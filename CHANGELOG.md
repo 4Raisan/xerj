@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Public Agent Skills Discovery v0.2.0 index and a documentation-routing skill
+  at `/.well-known/agent-skills/`. The index is generated from the published
+  skill's metadata and exact-byte SHA-256, with a CI drift check.
+
 ### Fixed
 
 - `xerj autoindex` compresses per-file phase-B stages with zstd level 1 and
