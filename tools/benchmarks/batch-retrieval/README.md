@@ -28,7 +28,9 @@ The offline Cargo build needs cached dependencies; omit `--offline` on a first
 build. Cargo runs from `engine/` to load its target-specific configuration.
 Use a release binary built from the
 declared engine commit; the harness records its SHA-256 and version but cannot
-prove its source ancestry. Indexing and timing use that same binary.
+prove its source ancestry. Indexing and timing execute a private copy of the
+exact byte snapshot that was hashed; changing the original binary mid-run
+cannot change the measured executable.
 
 The archive is pinned by its GitHub release asset SHA-256:
 `54f0419e6d944635eeaf9199923064278c36fd578213db60ca77cc85d2a69e3d`.

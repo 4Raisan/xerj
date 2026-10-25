@@ -14,6 +14,18 @@ def hit(identifier='known', citation_id=None):
 
 
 class ScoringTests(unittest.TestCase):
+    def test_executed_snapshot_does_not_reopen_mutable_binary(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            original = work / 'input'
+            original.write_bytes(b'first binary')
+            data = original.read_bytes()
+            original.write_bytes(b'replacement binary')
+            frozen = eval.freeze_binary(data, work)
+            self.assertEqual(frozen.read_bytes(), data)
+            self.assertEqual(eval.sha(frozen.read_bytes()), eval.sha(data))
+            self.assertTrue(frozen.stat().st_mode & 0o100)
+
     def test_wrong_archive_is_refused_before_parsing(self):
         with tempfile.TemporaryDirectory() as temp:
             pack = Path(temp) / 'pack.zip'

@@ -35,6 +35,13 @@ def sha(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def freeze_binary(data, work):
+    binary = work / 'xerj'
+    binary.write_bytes(data)
+    binary.chmod(0o700)
+    return binary
+
+
 def read_pack(path):
     # Read once: both the digest and records refer to these exact bytes. No extraction.
     data = path.read_bytes()
@@ -355,14 +362,13 @@ def main():
     case_bytes = (HERE / 'cases.json').read_bytes()
     cases = json.loads(case_bytes)
     validate_cases(cases, records)
-    binary = args.binary.resolve(strict=True)
-    binary_sha = sha(binary.read_bytes())
+    binary_data = args.binary.resolve(strict=True).read_bytes()
+    binary_sha = sha(binary_data)
     env = child_env()
-    version = subprocess.check_output([str(binary), '--version'], text=True, env=env).strip()
     host = hardware()
     args.output.mkdir(parents=True, exist_ok=False)
     report = {'schema_version': 1, 'date_utc': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
-              'binary_version': version, 'binary_sha256': binary_sha,
+              'binary_sha256': binary_sha,
               'engine_source_commit_declared': args.engine_commit,
               'harness_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip(),
               'harness_dirty': bool(subprocess.check_output(['git', 'status', '--porcelain'], cwd=ROOT)),
@@ -383,6 +389,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix='xerj-batch-retrieval-') as temp:
         work = Path(temp)
         try:
+            # Execute the same private byte snapshot we hashed, even if Cargo
+            # or another operator replaces the original executable during a run.
+            binary = freeze_binary(binary_data, work)
+            report['binary_version'] = subprocess.check_output(
+                [str(binary), '--version'], text=True, cwd=work, env=env).strip()
             with node(binary, work, env) as url:
                 ingest(url, records)
                 reference = None
