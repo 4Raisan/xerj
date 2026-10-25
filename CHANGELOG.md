@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `xerj sessions import --format codex` prepares one explicitly selected Codex
+  rollout JSONL using the same native PII redactor and no-clobber publication
+  as the Claude Code adapter. It exports user/assistant response text with
+  source locations, archive event IDs and explicit message phases; duplicate
+  events, system/developer messages, reasoning and tool payloads are skipped. Unsupported
+  shapes and external history references refuse publication. This extends
+  #1793 without automatic discovery or inferred file/commit associations. See
+  [the format contract](tools/session-import/README.md#codex-rollout-adapter).
+
 - `xerj sessions import --format claude-code --input FILE --output NEW.jsonl`
   prepares an explicit Claude Code JSONL transcript for ordinary `autoindex`.
   It emits text-bearing user/assistant records through the existing native
