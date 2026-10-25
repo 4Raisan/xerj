@@ -101,6 +101,9 @@ For each transport the two arms are:
   query semantics, mapping lookup, response schema and citation policy fixed.
   It is not a comparison with `xerj_search`, `xerj code`, grep or an LLM.
 
+These are tool-call counts, not observed HTTP request counts: the intentionally
+invalid item is rejected locally and mapping reads are part of the adapter.
+
 Both request `size: 3`, no `max_tokens`. All requests run at concurrency one.
 One full warmup per arm is discarded. Five measured repeats alternate arm
 order. CLI runs before MCP on the same refreshed, unchanged index. Caches stay
@@ -137,3 +140,39 @@ the explicit command above, not a network-dependent merge gate.
 Generated answers, automatic alias-field discovery, confidence calibration and
 escalation remain separate work under #1801 and its related issues. This
 evaluation alone does not close #1801.
+
+## Measured run: 2026-10-25
+
+[Raw per-call and per-item receipts](results/2026-10-25-macos-arm64.json),
+from clean harness commit `f016e078d61bd3a2b94ea140ef3515ef1a266705` and a
+Rust 1.97.1 release build of engine commit
+`7e1554734c5b26f7c4f85ee7b5ba838148fe1089` (`xerj v1.0.0-rc.99`).
+macOS arm64, Apple M4, 16 GiB RAM; `XERJ_NUM_CPUS=4`.
+This was a shared developer laptop, with warm caches and concurrency one.
+The command above ran with `--repeats 5`; the earlier two-repeat smoke is not
+included in these receipts. The receipt records the binary, pack and query
+SHA-256 values, full public pack manifest and source provenance.
+
+| Transport / arm | Calls per 50 items | Task median ms (min–max) | Input BPE tokens | Output BPE tokens |
+|---|---:|---:|---:|---:|
+| CLI / batch | 1 | 26.487 (26.209–27.632) | 1,071 | 87,676 |
+| CLI / single | 50 | 487.739 (480.636–491.249) | 1,757 | 87,872 |
+| Persistent MCP / batch | 1 | 15.410 (15.340–16.186) | 1,101 | 100,591 |
+| Persistent MCP / single | 50 | 29.515 (28.871–29.931) | 3,306 | 102,257 |
+
+Token totals are per complete 50-item trial and were identical in all five
+repeats for each arm. The CLI median ratio is 18.41x, including process startup;
+the persistent MCP ratio is 1.92x. They do not measure server-only speedup.
+Batching reduced input payload tokens by 39.04% (CLI) / 66.70% (MCP), but output
+payload tokens by only 0.22% / 1.63%. Full stored advisory bodies dominate
+output. This run does not support a large output-token-savings claim.
+
+All four arms and five repeats scored 49/49 valid retrieval items correctly:
+31/31 exact lookups including the duplicate, 8/8 labelled text hit@3, and
+10/10 intended misses. Each trial abstained on 10/49 valid items (20.41%),
+with zero false abstentions on the 39 labelled answerable items. The separate
+invalid item returned its query-validation error without losing siblings.
+Every returned hit had a checked index/ID citation; ranked evidence and
+citations matched across modes, transports and repeats. The index retained
+2,051 records before and after graceful restart. This is a small fixed
+known-item workload, not an estimate of general advisory QA accuracy.
