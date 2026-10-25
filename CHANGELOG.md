@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Empty autoindex maps now explain that managed corpus slugs and autoindex
+  dataset/index names belong to separate discovery surfaces. CLI diagnostics,
+  MCP empty responses and the `xerj_map` description point to corpus discovery
+  without claiming a corpus exists. Missing catalogs remain errors; auth
+  refusals and successful dataset maps retain their behavior (#2412).
+
 - `xerj sessions import --format claude-code --input FILE --output NEW.jsonl`
   prepares an explicit Claude Code JSONL transcript for ordinary `autoindex`.
   It emits text-bearing user/assistant records through the existing native

@@ -12869,7 +12869,15 @@ fn run_map(cfg: MapCfg) -> Result<i32> {
         if let Some(s) = sort {
             body["sort"] = s;
         }
-        let v = es.search(catalog::CATALOG_INDEX, &body)?;
+        let v = es
+            .search_present(catalog::CATALOG_INDEX, &body)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "autoindex catalog {} is missing (HTTP 404). {}",
+                    catalog::CATALOG_INDEX,
+                    catalog::MAP_NAMESPACE_HINT
+                )
+            })?;
         Ok(v.pointer("/hits/hits")
             .and_then(|h| h.as_array())
             .map(|arr| {
@@ -12901,17 +12909,18 @@ fn run_map(cfg: MapCfg) -> Result<i32> {
     if datasets.is_empty() {
         if let Some(prefix) = cfg.prefix.as_deref() {
             eprintln!(
-                "no autoindex catalog found for --prefix {prefix} at {} (index {}) — run `xerj autoindex <folder> --prefix {prefix}` first",
+                "no autoindex datasets match --prefix {prefix} at {} (catalog {})",
                 cfg.url,
                 catalog::CATALOG_INDEX
             );
         } else {
             eprintln!(
-                "no autoindex catalog found at {} (index {}) — run `xerj autoindex <folder>` first",
+                "no autoindex datasets match at {} (catalog {})",
                 cfg.url,
                 catalog::CATALOG_INDEX
             );
         }
+        eprintln!("{}", catalog::MAP_NAMESPACE_HINT);
         return Ok(1);
     }
     let mut run_must = vec![json!({"term": {"doc_kind": "run"}})];

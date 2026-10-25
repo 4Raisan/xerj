@@ -1266,7 +1266,7 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
         {
             "name": "xerj_map",
             "description": format!(
-                "{}{NEVER_DELETE_INDEX}",
+                "{} {}{NEVER_DELETE_INDEX}",
                 concat!(
                 "Per-index FIELD MAP from this node's autoindex catalog — call it ",
                 "BEFORE writing query DSL, so you stop guessing field names. For each ",
@@ -1285,7 +1285,7 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                 "reports more). When more than 8 indexes match and you did not pass ",
                 "`index`, the answer is a SUMMARY page (index, records, field names) ",
                 "— pass `index` or `detail: true` with `offset`/`limit` for full fields."
-            )),
+            ), xerj_autoindex::catalog::MAP_NAMESPACE_HINT),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -6162,6 +6162,8 @@ mod tests {
             "not tracked",
             "indexes_omitted",
             "at autoindex time",
+            "managed corpus registry",
+            "xerj corpus list",
         ] {
             assert!(d.contains(needle), "description lacks `{needle}`: {d}");
         }
