@@ -42,8 +42,8 @@ def main():
         def do_POST(self):
             requests.append(('POST', self.path))
             body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            if mode in ('missing', 'forbidden'):
-                status = 404 if mode == 'missing' else 403
+            if mode in ('missing', 'unauthorized', 'forbidden'):
+                status = {'missing': 404, 'unauthorized': 401, 'forbidden': 403}[mode]
                 kind = 'index_not_found_exception' if status == 404 else 'security_exception'
                 self.reply(status, {'error': {'type': kind, 'reason': 'fixture refusal'}, 'status': status})
                 return
@@ -58,7 +58,8 @@ def main():
     failures = []
     try:
         with tempfile.TemporaryDirectory(prefix='xerj-catalog-map-') as temp:
-            for mode in ('empty', 'missing', 'forbidden', 'positive'):
+            env.update(HOME=temp, USERPROFILE=temp, XDG_CONFIG_HOME=str(Path(temp) / 'config'), XDG_DATA_HOME=str(Path(temp) / 'data'))
+            for mode in ('empty', 'missing', 'unauthorized', 'forbidden', 'positive'):
                 for transport in ('cli', 'mcp'):
                     requests.clear()
                     try:
@@ -84,7 +85,7 @@ def main():
                                                     cwd=temp, env=env, capture_output=True, text=True, timeout=30)
                             assert result.returncode == 0, result.stderr
                             reply = next(json.loads(line)['result'] for line in result.stdout.splitlines() if json.loads(line).get('id') == 2)
-                            assert reply.get('isError', False) == (mode in ('missing', 'forbidden')), reply
+                            assert reply.get('isError', False) == (mode in ('missing', 'unauthorized', 'forbidden')), reply
                             text = reply['content'][0]['text']
                             if mode == 'empty':
                                 mapped = json.loads(text)
@@ -93,8 +94,8 @@ def main():
                             assert 'managed corpus' in text, text
                             assert 'xerj corpus list' in text, text
                             assert 'not establish' in text, text
-                        elif mode == 'forbidden':
-                            assert '403' in text, text
+                        elif mode in ('unauthorized', 'forbidden'):
+                            assert ('401' if mode == 'unauthorized' else '403') in text, text
                             assert 'managed corpus' not in text, text
                         else:
                             assert 'ax-code' in text, text

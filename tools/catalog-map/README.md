@@ -37,8 +37,8 @@ python3 tools/catalog-map/smoke.py --binary engine/target/release/xerj
 
 The script uses only a private loopback HTTP fixture and temporary client cwd.
 It does not run a node, read corpus configuration, index data or contact an
-existing server. Eight CLI/MCP cases cover empty results, missing catalogs,
-403 refusals and populated datasets; CLI also verifies `--json` stdout.
+existing server. Ten CLI/MCP cases cover empty results, missing catalogs,
+401/403 refusals and populated datasets; CLI also verifies `--json` stdout.
 Requests must remain reads of `/`, catalog `_search` or dataset `_mapping`.
 The client/fixture processes stop and temporary files are removed on completion.
 These fixtures do not establish live managed-corpus availability or relevance.
