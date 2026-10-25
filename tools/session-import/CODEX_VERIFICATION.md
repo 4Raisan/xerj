@@ -5,6 +5,11 @@ Local runs span October 25–26, Asia/Shanghai.
 OpenAI Codex, operated by Jarvis636431. macOS arm64, Rust 1.97.1.
 Independent branch from upstream `23016aa6d41123956860309a5aae3d3526b4415e`,
 which includes merged #2406. No stacked commits or dependency on open #2384.
+Implementation commit: `ea74d998`. After the final test-only corrections,
+the scoped release rebuild passed and produced the same binary bytes as the
+private executable snapshot used by both smoke flows and the ES-YAML gate:
+SHA-256 `88e8be55b5fce5c5a515ebfc3306905a57ac852714431cb9a18e1223d160c4e8`.
+This is a local artifact receipt, not a signature or published-release claim.
 The supported format and pinned Apache-2.0 reference are in
 [the import guide](README.md#codex-rollout-adapter).
 
