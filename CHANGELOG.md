@@ -79,6 +79,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `_reindex` follows aliases on both sides: a source alias is searched across
+  every backing index and each member's alias filter is applied, and a
+  destination alias writes to its single write index (an ambiguous alias is
+  refused with `illegal_argument_exception`). Previously only the first
+  backing index was read or written and filters were ignored, so the call
+  reported success over the wrong data.
+
 - `xerj autoindex` no longer runs out of memory while planning a large folder.
   It used to keep the sampled values of every file in memory at once before
   grouping them into datasets, and kept them all until the end of the run;

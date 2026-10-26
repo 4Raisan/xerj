@@ -28109,6 +28109,22 @@ pub struct ReindexDest {
     pub pipeline: Option<String>,
 }
 
+/// The filter attached to `alias` on one backing index, if any. Alias
+/// metadata is stored per (backing index, alias), so a multi-index alias can
+/// carry a different filter on each member; a concrete source has no entry.
+fn alias_filter_for(state: &AppState, backing: &str, alias: &str) -> Option<Value> {
+    state
+        .engine
+        .index_alias_metadata
+        .get(backing)
+        .and_then(|v| {
+            v.get(alias)
+                .and_then(|meta| meta.get("filter"))
+                .filter(|filter| !filter.is_null())
+                .cloned()
+        })
+}
+
 pub async fn reindex(
     State(state): State<AppState>,
     Json(body): Json<ReindexBody>,
@@ -28152,7 +28168,16 @@ pub async fn reindex(
     }
 
     let source_name = &body.source.index;
-    let dest_name = &body.dest.index;
+    // The destination may be an alias. ES routes a write through an alias to
+    // its single write index and rejects an ambiguous alias;
+    // `get_or_create_index` resolves an alias to its FIRST member, so the old
+    // path copied the whole corpus into whichever member happened to be listed
+    // first. Resolve before the pipeline check so a refused destination writes
+    // nothing (not even a new index).
+    let dest_name = match write_target_or_refusal(&state, &body.dest.index) {
+        Ok(name) => name,
+        Err(resp) => return resp,
+    };
 
     // `dest.pipeline` is checked BEFORE a single document is copied. A name
     // that does not resolve, or one this build cannot run, fails the whole
@@ -28190,36 +28215,16 @@ pub async fn reindex(
     };
 
     // Get or create destination index.
-    let dest_idx = match state.engine.get_or_create_index(dest_name) {
+    let dest_idx = match state.engine.get_or_create_index(&dest_name) {
         Ok(i) => i,
         Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_response(),
     };
 
-    // Fetch all docs from source via paginated search_after to handle large indices.
-    let source_idx = match state.engine.get_index(source_name) {
-        Ok(i) => i,
-        Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_response(),
-    };
-
-    // Flush the source memtable to segments before paging. `_id`-sorted
-    // `search_after` keyset pagination is correct over on-disk segments, but
-    // the in-memory memtable's field-sort path does NOT order by `_id`
-    // reliably, so un-flushed recent writes would be skipped or duplicated
-    // across pages. Reindex is a snapshot-style bulk op, so a single flush up
-    // front is an acceptable cost and makes the whole source keyset-pageable.
-    //
-    // Propagated, not swallowed, for the same reason as `clone_index_to`: the
-    // flush is a precondition of the paging being complete, so a failed flush
-    // must not be followed by a reindex that reports `"total": N` over a source
-    // it could not read consistently (issue #204).
-    if let Err(e) = source_idx.flush().await {
-        return ApiError::new(xerj_common::XerjError::internal(format!(
-            "reindex from [{source_name}] into [{dest_name}] was not attempted: flushing \
-             the source failed ({e}); the copy needs a flushed source to page over it \
-             without skipping or duplicating documents"
-        )))
-        .into_response();
-    }
+    // `source.index` may be an index, alias, or data stream. For an alias ES
+    // searches EVERY backing index and applies each member's alias filter;
+    // `get_index` resolves an alias to its first member only, so the old path
+    // silently copied a fraction of the alias and ignored its filters.
+    let source_members = state.engine.resolve_alias(source_name);
 
     let query_val = body
         .source
@@ -28239,138 +28244,186 @@ pub async fn reindex(
     let mut noops = 0usize;
     let mut failures: Vec<Value> = Vec::new();
     let mut batches = 0usize;
-    // Keyset cursor: `[last_id]` of the previous page (the sole sort key is
-    // `_id: asc`). `None` on the first page. This replaces `from`-offset
-    // paging, which silently truncated at `max_result_window` (~10k) once
-    // `from` exceeded the deep-paging limit.
-    let mut search_after: Option<Value> = None;
 
-    loop {
-        let mut search_body_val = json!({
-            "query": query_val,
-            "size": page_size,
-            "sort": [{ "_id": "asc" }],
-            // Reindex copies documents verbatim, so it must always read the
-            // COMPLETE `_source` — including engine-generated embedding
-            // companions. Omitting `_source` would inherit the search default,
-            // which deliberately hides those companions from ordinary API
-            // responses; inheriting it here would silently drop embeddings from
-            // every reindexed document.
-            "_source": true,
-        });
-        if let Some(ref sa) = search_after {
-            search_body_val["search_after"] = sa.clone();
-        }
-
-        let search_req = match xerj_query::parse_request(&search_body_val)
-            .map_err(|e| xerj_common::XerjError::invalid_query(e.to_string()))
-        {
-            Ok(r) => r,
-            Err(e) => return ApiError::new(e).into_response(),
-        };
-
-        let results = match source_idx.search(&search_req).await {
-            Ok(r) => r,
+    for source_member in &source_members {
+        let source_idx = match state.engine.get_index(source_member) {
+            Ok(i) => i,
             Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_response(),
         };
-        // A script resource limit in `source.query` makes matching fail-closed,
-        // so this batch is a subset of the documents the caller asked to copy.
-        // Reporting a completed reindex over a silently truncated source is the
-        // same class of defect as a silently wrong score.
-        if let Some(reason) = &results.script_failure {
-            return script_limit_response(reason);
+
+        // Flush the member's memtable to segments before paging. `_id`-sorted
+        // `search_after` keyset pagination is correct over on-disk segments,
+        // but the in-memory memtable's field-sort path does NOT order by `_id`
+        // reliably, so un-flushed recent writes would be skipped or duplicated
+        // across pages. Reindex is a snapshot-style bulk op, so a flush up
+        // front is an acceptable cost and makes the member keyset-pageable.
+        //
+        // Propagated, not swallowed, for the same reason as `clone_index_to`:
+        // the flush is a precondition of the paging being complete, so a failed
+        // flush must not be followed by a reindex that reports `"total": N` over
+        // a source it could not read consistently (issue #204).
+        if let Err(e) = source_idx.flush().await {
+            return ApiError::new(xerj_common::XerjError::internal(format!(
+                "reindex from [{source_name}] into [{dest_name}] was not attempted: flushing \
+                 the source failed ({e}); the copy needs a flushed source to page over it \
+                 without skipping or duplicating documents"
+            )))
+            .into_response();
         }
 
-        let batch_size = results.hits.len();
-        if batch_size == 0 {
-            break;
-        }
+        // An alias filter is part of the source view. It is stored per
+        // (backing index, alias), so a multi-index alias can filter each
+        // member differently; a concrete source has no entry. AND the filter
+        // with the caller's query (`must` + `filter`) so neither is ignored.
+        let effective_query = match alias_filter_for(&state, source_member, source_name) {
+            Some(filter) => json!({
+                "bool": {
+                    "must": [query_val.clone()],
+                    "filter": [filter],
+                }
+            }),
+            None => query_val.clone(),
+        };
 
-        batches += 1;
-        total_fetched += batch_size;
+        // Keyset cursor: `[last_id]` of the previous page (the sole sort key
+        // is `_id: asc`). Reset per member: ids are only ordered within one
+        // index. This replaces `from`-offset paging, which silently truncated
+        // at `max_result_window` (~10k) once `from` exceeded the deep-paging
+        // limit.
+        let mut search_after: Option<Value> = None;
 
-        // Capture the keyset cursor before the `for` loop consumes `results.hits`.
-        let last_id = results.hits.last().map(|h| h.id.clone());
+        loop {
+            let mut search_body_val = json!({
+                "query": effective_query.clone(),
+                "size": page_size,
+                "sort": [{ "_id": "asc" }],
+                // Reindex copies documents verbatim, so it must always read the
+                // COMPLETE `_source` — including engine-generated embedding
+                // companions. Omitting `_source` would inherit the search
+                // default, which deliberately hides those companions from
+                // ordinary API responses; inheriting it here would silently
+                // drop embeddings from every reindexed document.
+                "_source": true,
+            });
+            if let Some(ref sa) = search_after {
+                search_body_val["search_after"] = sa.clone();
+            }
 
-        for hit in results.hits {
-            if !hit.source.is_null() {
-                // `dest.pipeline`, if the request named one. Already known to
-                // exist and to be runnable (checked before any copy started),
-                // so anything that goes wrong here is a per-document failure
-                // and is reported as one — never a pass-through of the
-                // untransformed source.
-                let doc_source = match dest_pipeline.as_deref() {
-                    None => hit.source,
-                    Some(p) => match state.engine.process_through_pipeline(p, vec![hit.source]) {
-                        Ok(mut results) if !results.is_empty() => {
-                            let (action, transformed) = results.remove(0);
-                            if matches!(action, xerj_wasm::pipeline::ProcessAction::Drop) {
-                                // ES: a pipeline that drops the document does
-                                // not write it, and the run reports a noop.
-                                noops += 1;
+            let search_req = match xerj_query::parse_request(&search_body_val)
+                .map_err(|e| xerj_common::XerjError::invalid_query(e.to_string()))
+            {
+                Ok(r) => r,
+                Err(e) => return ApiError::new(e).into_response(),
+            };
+
+            let results = match source_idx.search(&search_req).await {
+                Ok(r) => r,
+                Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_response(),
+            };
+            // A script resource limit in `source.query` makes matching fail-closed,
+            // so this batch is a subset of the documents the caller asked to copy.
+            // Reporting a completed reindex over a silently truncated source is the
+            // same class of defect as a silently wrong score.
+            if let Some(reason) = &results.script_failure {
+                return script_limit_response(reason);
+            }
+
+            let batch_size = results.hits.len();
+            if batch_size == 0 {
+                break;
+            }
+
+            batches += 1;
+            total_fetched += batch_size;
+
+            // Capture the keyset cursor before the `for` loop consumes `results.hits`.
+            let last_id = results.hits.last().map(|h| h.id.clone());
+
+            for hit in results.hits {
+                if !hit.source.is_null() {
+                    // `dest.pipeline`, if the request named one. Already known to
+                    // exist and to be runnable (checked before any copy started),
+                    // so anything that goes wrong here is a per-document failure
+                    // and is reported as one — never a pass-through of the
+                    // untransformed source.
+                    let doc_source = match dest_pipeline.as_deref() {
+                        None => hit.source,
+                        Some(p) => match state.engine.process_through_pipeline(p, vec![hit.source])
+                        {
+                            Ok(mut results) if !results.is_empty() => {
+                                let (action, transformed) = results.remove(0);
+                                if matches!(action, xerj_wasm::pipeline::ProcessAction::Drop) {
+                                    // ES: a pipeline that drops the document does
+                                    // not write it, and the run reports a noop.
+                                    noops += 1;
+                                    continue;
+                                }
+                                transformed
+                            }
+                            Ok(_) => {
+                                failures.push(json!({
+                                    "id": hit.id,
+                                    "cause": {
+                                        "type": "reindex_error",
+                                        "reason": format!(
+                                            "pipeline [{p}] returned no document for [{}]",
+                                            hit.id
+                                        ),
+                                    },
+                                }));
                                 continue;
                             }
-                            transformed
-                        }
+                            Err(e) => {
+                                failures.push(json!({
+                                    "id": hit.id,
+                                    "cause": {
+                                        "type": "reindex_error",
+                                        "reason": format!("pipeline [{p}] failed: {e}"),
+                                    },
+                                }));
+                                continue;
+                            }
+                        },
+                    };
+                    // Check if doc already exists in dest to track created vs updated.
+                    let exists = dest_idx
+                        .get_document(&hit.id)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some();
+                    match dest_idx
+                        .index_document(Some(hit.id.clone()), doc_source)
+                        .await
+                    {
                         Ok(_) => {
-                            failures.push(json!({
-                                "id": hit.id,
-                                "cause": {
-                                    "type": "reindex_error",
-                                    "reason": format!(
-                                        "pipeline [{p}] returned no document for [{}]",
-                                        hit.id
-                                    ),
-                                },
-                            }));
-                            continue;
+                            if exists {
+                                updated += 1;
+                            } else {
+                                created += 1;
+                            }
                         }
                         Err(e) => {
                             failures.push(json!({
                                 "id": hit.id,
-                                "cause": {
-                                    "type": "reindex_error",
-                                    "reason": format!("pipeline [{p}] failed: {e}"),
-                                },
+                                "cause": { "type": "reindex_error", "reason": e.to_string() },
                             }));
-                            continue;
                         }
-                    },
-                };
-                // Check if doc already exists in dest to track created vs updated.
-                let exists = dest_idx
-                    .get_document(&hit.id)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
-                match dest_idx
-                    .index_document(Some(hit.id.clone()), doc_source)
-                    .await
-                {
-                    Ok(_) => {
-                        if exists {
-                            updated += 1;
-                        } else {
-                            created += 1;
-                        }
-                    }
-                    Err(e) => {
-                        failures.push(json!({
-                            "id": hit.id,
-                            "cause": { "type": "reindex_error", "reason": e.to_string() },
-                        }));
                     }
                 }
             }
+
+            // Advance the keyset cursor to the last `_id` of this page.
+            search_after = last_id.map(|id| json!([id]));
+
+            // Stop if we've reached the safety backstop or fetched fewer docs than
+            // requested (meaning we hit the end of the source).
+            if batch_size < page_size || total_fetched >= max_total {
+                break;
+            }
         }
 
-        // Advance the keyset cursor to the last `_id` of this page.
-        search_after = last_id.map(|id| json!([id]));
-
-        // Stop if we've reached the safety backstop or fetched fewer docs than
-        // requested (meaning we hit the end of the source).
-        if batch_size < page_size || total_fetched >= max_total {
+        if total_fetched >= max_total {
             break;
         }
     }
