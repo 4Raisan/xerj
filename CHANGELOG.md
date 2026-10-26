@@ -79,6 +79,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `autoindex` bulk back-pressure patience is now measured since the last
+  progress, not since the first round. A window the server drains a few
+  records at a time (per-item 429 `resource_exhausted` on an embedding
+  deadline or admission refusal) used to abort with `bulk backend failed`
+  once the rounds together passed the 600 s `THROTTLE_PATIENCE`, even though
+  every round settled records. Each round that settles at least one item now
+  restarts the patience clock and the backoff; rounds that settle nothing
+  still count, so a server that answers 429 forever fails at the same limits
+  as before.
+
 - The parent memory breaker no longer flaps, and background merges and flush
   finalizes are bounded while it is engaged (#2427). A 3,000 MB autoindex run
   engaged the breaker 20 times in 16 minutes, often releasing 100-500 ms
