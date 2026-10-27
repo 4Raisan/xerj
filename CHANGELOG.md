@@ -112,6 +112,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj search` names an unknown flag on one line and exits 2 instead of
+  following "unexpected argument" with the whole usage text (#2458). An
+  agent that guessed `--index` and `--max-hits` read the help dump as the
+  answer and gave up on the CLI. Those guesses, and `--size`, `--limit`,
+  `--top`, `--top-k`, `-n` and `-i`, now point at `--prefix <P>` or
+  `-k <N>`.
+
 - `xerj code` shows the part of a long definition that matched the query,
   not its first `--full` characters (#2464). The matching text could sit
   thousands of characters below the signature, so a hit named the right
