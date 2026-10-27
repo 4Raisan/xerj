@@ -112,6 +112,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj autoindex` no longer leaves large `.autoindex-stage-*` files in the
+  state dir (#2427, PR [#2493](https://github.com/xerj-org/xerj/pull/2493)).
+  Phase B staged each file as uncompressed NDJSON in a named temp file, which
+  was several times the size of the source for row-shaped data (a 31.7 MB
+  trace staged as about 215 MB) and was left behind when the client was
+  killed by a signal. Stages are now zstd-compressed and written to an
+  unnamed temp file that the kernel frees when the client exits, however it
+  exits.
 - `xerj code` shows the part of a long definition that matched the query,
   not its first `--full` characters (#2464). The matching text could sit
   thousands of characters below the signature, so a hit named the right
