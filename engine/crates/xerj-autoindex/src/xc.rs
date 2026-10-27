@@ -438,8 +438,8 @@ const CORPUS_USAGE: &str =
 
 a flag may precede the verb (xerj corpus --url URL index <name>);
 clone the repos, detect licences, write corpora/<name>/corpus.json;
-a repo entry may set 'paths' to relative directories (for example data/osv)
-and the checkout harvests only those; omit it to harvest the whole pin, and
+a repo entry may set 'paths' to relative directories or files (for example
+data/osv) and the checkout harvests only those; omit it to harvest the whole pin, and
 the list is written back into corpus.json;
 a local checkout's root .xerjignore is copied into the clone when it differs
 from the committed file (git clone drops an untracked or uncommitted one);
@@ -547,11 +547,11 @@ pub(crate) fn checkout_at_sha_paths(
     fetch_pin(target, sha)?;
     // Refuse a path the pin does not contain BEFORE the sparse rules change
     // the worktree. A typo must not delete the previous checkout.
-    confirm_paths_are_trees(target, sha, paths)?;
-    apply_sparse_limit(target, paths)?;
+    let kinds = confirm_paths_exist(target, sha, paths)?;
+    apply_sparse_limit(target, paths, &kinds)?;
     checkout_pin(target, sha)?;
     git(Some(target), &["clean", "-qfd"]).ok();
-    confirm_paths_materialized(target, paths)?;
+    confirm_paths_materialized(target, paths, &kinds)?;
     Ok(())
 }
 
@@ -559,13 +559,13 @@ pub(crate) fn checkout_at_sha_paths(
 /// fetching again. A re-run of a manifest that gained `paths` narrows a
 /// previous whole-repo checkout; a re-run that dropped `paths` restores it.
 pub(crate) fn limit_checked_out_pin(target: &Path, sha: &str, paths: &[String]) -> Result<()> {
-    confirm_paths_are_trees(target, sha, paths)?;
+    let kinds = confirm_paths_exist(target, sha, paths)?;
     let was_sparse = sparse_checkout_enabled(target);
-    apply_sparse_limit(target, paths)?;
+    apply_sparse_limit(target, paths, &kinds)?;
     if !paths.is_empty() || was_sparse {
         git(Some(target), &["clean", "-qfd"]).ok();
     }
-    confirm_paths_materialized(target, paths)?;
+    confirm_paths_materialized(target, paths, &kinds)?;
     Ok(())
 }
 
@@ -646,9 +646,11 @@ fn sparse_checkout_enabled(target: &Path) -> bool {
 /// is on disk, and those extra files are how a "subpath" harvest still
 /// becomes another dataset. Non-cone pattern `/{path}/` is the directory and
 /// everything under it, and not a sibling whose name merely starts with the
-/// same prefix (`data/osv-extra`). Git 2.43 accepts `--no-cone`. If a future
-/// git removes it, this fails closed instead of cloning the whole pin.
-fn apply_sparse_limit(target: &Path, paths: &[String]) -> Result<()> {
+/// same prefix (`data/osv-extra`). A file entry is `/{path}`: that file and
+/// not `resample.pyx` beside `resample.py` (#2486). Git 2.43 accepts
+/// `--no-cone`. If a future git removes it, this fails closed instead of
+/// cloning the whole pin.
+fn apply_sparse_limit(target: &Path, paths: &[String], kinds: &[PathKind]) -> Result<()> {
     if paths.is_empty() {
         if !sparse_checkout_enabled(target) {
             return Ok(());
@@ -662,7 +664,14 @@ fn apply_sparse_limit(target: &Path, paths: &[String]) -> Result<()> {
     for path in paths {
         xccode::pathgate::valid_sparse_path(path).map_err(anyhow::Error::msg)?;
     }
-    let patterns: Vec<String> = paths.iter().map(|path| format!("/{path}/")).collect();
+    let patterns: Vec<String> = paths
+        .iter()
+        .zip(kinds)
+        .map(|(path, kind)| match kind {
+            PathKind::Dir => format!("/{path}/"),
+            PathKind::File => format!("/{path}"),
+        })
+        .collect();
     let mut args: Vec<&str> = vec!["sparse-checkout", "set", "--no-cone", "--"];
     for pattern in &patterns {
         args.push(pattern);
@@ -677,35 +686,70 @@ fn apply_sparse_limit(target: &Path, paths: &[String]) -> Result<()> {
     Ok(())
 }
 
-fn confirm_paths_are_trees(target: &Path, sha: &str, paths: &[String]) -> Result<()> {
-    for path in paths {
-        let spec = format!("{sha}:{path}");
-        match git_stdout(target, &["cat-file", "-t", &spec]) {
-            Ok((0, out, _)) => {
-                let kind = out.split_whitespace().next().unwrap_or("");
-                if kind != "tree" {
-                    anyhow::bail!(
-                        "paths entry '{path}' is a {kind} at {sha}, not a directory. \
-                         Name the directory to harvest (for example \"data/osv\")"
-                    );
-                }
-            }
-            Ok((_, _, err)) => anyhow::bail!(
-                "paths entry '{path}' is not a directory at {sha}. The pin has no \
-                 such tree, so nothing was checked out. git: {err}"
-            ),
-            Err(e) => anyhow::bail!("could not inspect '{path}' at {sha}: {e}"),
-        }
-    }
-    Ok(())
+/// What a `paths` entry names at the pin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathKind {
+    Dir,
+    File,
 }
 
-fn confirm_paths_materialized(target: &Path, paths: &[String]) -> Result<()> {
+/// Classify every entry at the pin, in order. A directory or a regular file
+/// (#2486) is harvested. A symlink, a submodule, or a path the pin does not
+/// contain is refused: a link would hand `corpus index` a target the
+/// manifest author chose. `ls-tree` reads the tree entry's mode from the
+/// tree objects the shallow fetch already has, so classifying a file does
+/// not fetch its content (`cat-file -t` would, in a blob:none clone).
+fn confirm_paths_exist(target: &Path, sha: &str, paths: &[String]) -> Result<Vec<PathKind>> {
+    let mut kinds = Vec::with_capacity(paths.len());
     for path in paths {
-        if !target.join(path).is_dir() {
+        let out = match git_stdout(target, &["ls-tree", sha, "--", path]) {
+            Ok((0, out, _)) => out,
+            Ok((_, _, err)) => anyhow::bail!("could not inspect '{path}' at {sha}: {err}"),
+            Err(e) => anyhow::bail!("could not inspect '{path}' at {sha}: {e}"),
+        };
+        let mut lines = out.lines();
+        let mode = match (lines.next(), lines.next()) {
+            (Some(line), None) => line.split_whitespace().next().unwrap_or(""),
+            (None, _) => anyhow::bail!(
+                "paths entry '{path}' is not a directory or file at {sha}. The pin \
+                 has no such path, so nothing was checked out"
+            ),
+            (Some(_), Some(_)) => {
+                anyhow::bail!("paths entry '{path}' names more than one entry at {sha}")
+            }
+        };
+        match mode {
+            "040000" => kinds.push(PathKind::Dir),
+            "100644" | "100755" => kinds.push(PathKind::File),
+            "120000" => anyhow::bail!(
+                "paths entry '{path}' is a symlink at {sha}. Name the directory or \
+                 file it points to instead"
+            ),
+            "160000" => anyhow::bail!(
+                "paths entry '{path}' is a submodule at {sha}. Its content lives in \
+                 another repository; pin that repository as its own entry"
+            ),
+            _ => anyhow::bail!(
+                "paths entry '{path}' has git mode {mode} at {sha}, not a directory or \
+                 file. Name a directory (for example \"data/osv\") or a file to harvest"
+            ),
+        }
+    }
+    Ok(kinds)
+}
+
+fn confirm_paths_materialized(target: &Path, paths: &[String], kinds: &[PathKind]) -> Result<()> {
+    for (path, kind) in paths.iter().zip(kinds) {
+        let present = match kind {
+            PathKind::Dir => target.join(path).is_dir(),
+            PathKind::File => std::fs::symlink_metadata(target.join(path))
+                .map(|meta| meta.is_file())
+                .unwrap_or(false),
+        };
+        if !present {
             anyhow::bail!(
                 "sparse checkout did not materialize '{path}'. The pin lists that \
-                 directory, but the worktree does not contain it"
+                 path, but the worktree does not contain it"
             );
         }
     }
@@ -6306,5 +6350,177 @@ precedence = ["a", "b"]
             !home.path().join("corpora/escape-demo").exists(),
             "an escaping paths entry is refused before any directory is created"
         );
+    }
+
+    /// #2486: a `paths` entry may name a file. The pandas time-series pack
+    /// needs `pandas/core/resample.py` without the rest of `pandas/core`, and
+    /// naming the parent directory crowds the documentation out of the top
+    /// hits. A file entry checks out that file and nothing beside it: not a
+    /// sibling whose name starts the same way, and not a file of the same
+    /// name deeper in the tree (the pattern is anchored at the root).
+    #[test]
+    fn corpus_add_from_paths_harvests_a_named_file() {
+        let home = tempfile::tempdir().unwrap();
+        let _hold = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[
+                ("LICENSE", "bsd\n"),
+                ("pkg/core/resample.py", "def resample(): pass\n"),
+                ("pkg/core/resample.pyx", "cdef int x\n"),
+                ("pkg/core/frame.py", "class DataFrame: pass\n"),
+                ("other/pkg/core/resample.py", "def other(): pass\n"),
+                ("doc/timeseries.rst", "Time series\n"),
+            ],
+        );
+        let sha = head_sha(&origin);
+        let url = origin.display().to_string();
+        let manifest = home.path().join("pin.json");
+        let checkout = home.path().join("corpora/sparse-demo/vulndb");
+
+        write_pin(
+            &manifest,
+            &url,
+            &sha,
+            Some(&["pkg/core/resample.py", "doc"]),
+        );
+        assert_eq!(
+            run_corpus_add(&["--from".into(), manifest.display().to_string()]),
+            0,
+            "a paths entry naming a file must be harvested"
+        );
+        assert_eq!(
+            worktree_files(&checkout),
+            vec![
+                "doc/timeseries.rst".to_string(),
+                "pkg/core/resample.py".to_string(),
+            ]
+        );
+        let recorded =
+            manifest::read_corpus_manifest(&home.path().join("corpora/sparse-demo/corpus.json"))
+                .unwrap();
+        assert_eq!(
+            recorded.repos[0].paths,
+            vec!["pkg/core/resample.py".to_string(), "doc".to_string()]
+        );
+        assert_eq!(recorded.repos[0].files, Some(2));
+
+        // Re-adding over the existing checkout narrows and widens it too.
+        write_pin(&manifest, &url, &sha, Some(&["doc"]));
+        assert_eq!(
+            run_corpus_add(&["--from".into(), manifest.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["doc/timeseries.rst".to_string()]
+        );
+        write_pin(&manifest, &url, &sha, Some(&["pkg/core/frame.py"]));
+        assert_eq!(
+            run_corpus_add(&["--from".into(), manifest.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["pkg/core/frame.py".to_string()]
+        );
+    }
+
+    /// Each tree entry kind gets its own answer, read from the mode, so a
+    /// submodule is not reported as a missing path.
+    #[test]
+    fn confirm_paths_exist_classifies_each_entry_kind() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        init_committed_repo(&repo, &[("doc/a.rst", "a\n"), ("pkg/m.py", "x = 1\n")]);
+        let first = head_sha(&repo);
+        let gitlink = format!("160000,{first},vendor/sub");
+        let (rc, out) = git(
+            Some(&repo),
+            &["update-index", "--add", "--cacheinfo", &gitlink],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "git update-index: {out}");
+        let (rc, out) = git(
+            Some(&repo),
+            &[
+                "-c",
+                "user.email=xerj-test@example.com",
+                "-c",
+                "user.name=xerj-test",
+                "commit",
+                "--quiet",
+                "-m",
+                "gitlink",
+            ],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "git commit: {out}");
+        let sha = head_sha(&repo);
+        let paths = |list: &[&str]| list.iter().map(|p| p.to_string()).collect::<Vec<_>>();
+
+        assert_eq!(
+            confirm_paths_exist(&repo, &sha, &paths(&["pkg/m.py", "doc"])).unwrap(),
+            vec![PathKind::File, PathKind::Dir]
+        );
+        let err = confirm_paths_exist(&repo, &sha, &paths(&["vendor/sub"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a submodule"), "{err}");
+        let err = confirm_paths_exist(&repo, &sha, &paths(&["doc/nope.rst"]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("has no such path"), "{err}");
+    }
+
+    /// A symlink entry is refused end to end. Naming one would hand
+    /// `corpus index` a link the manifest author chose, possibly pointing out
+    /// of the checkout, so it is refused and no corpus is recorded.
+    #[cfg(unix)]
+    #[test]
+    fn corpus_add_from_paths_refuses_a_symlink_entry() {
+        let home = tempfile::tempdir().unwrap();
+        let _hold = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(&origin, &[("LICENSE", "bsd\n")]);
+        std::os::unix::fs::symlink("/etc/hostname", origin.join("link")).unwrap();
+        let (rc, out) = git(Some(&origin), &["add", "--", "link"]).unwrap();
+        assert_eq!(rc, 0, "git add link: {out}");
+        let (rc, out) = git(
+            Some(&origin),
+            &[
+                "-c",
+                "user.email=xerj-test@example.com",
+                "-c",
+                "user.name=xerj-test",
+                "commit",
+                "--quiet",
+                "-m",
+                "link",
+            ],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "git commit: {out}");
+        let sha = head_sha(&origin);
+        let manifest = home.path().join("pin.json");
+        write_pin(
+            &manifest,
+            &origin.display().to_string(),
+            &sha,
+            Some(&["link"]),
+        );
+        assert_eq!(
+            run_corpus_add(&["--from".into(), manifest.display().to_string()]),
+            1
+        );
+        assert!(
+            !home.path().join("corpora/sparse-demo/corpus.json").exists(),
+            "a refused symlink entry must not record a corpus"
+        );
+        assert!(!home
+            .path()
+            .join("corpora/sparse-demo/vulndb/LICENSE")
+            .exists());
     }
 }

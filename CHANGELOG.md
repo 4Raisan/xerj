@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A Corpus Hub manifest's `paths` entry may name a regular file as well as a
+  directory (#2486). `xerj corpus add --from` checks out exactly that file,
+  without its siblings, so a pack can take `pandas/core/resample.py` without
+  the rest of `pandas/core`. A symlink entry is refused. Manifests that name
+  only directories check out the same tree as before.
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
