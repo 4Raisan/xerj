@@ -71,6 +71,16 @@ across two machines. A `review` block in the input manifest (see
 [`hub/README.md`](hub/README.md)) is preserved for every repo that lands at its
 recorded SHA.
 
+A `corpus add` that was stopped partway (a tool timeout, Ctrl-C) can be run
+again (#2453). A clone stopped before its first checkout is cloned again;
+one stopped while writing files already holds every object, so its files are
+restored in place without the network. A pinned (`--from`) repo is instead
+fetched and checked out at its SHA as usual. A leftover `.git/index.lock`
+(git's sign that a git may still be writing; a hard kill leaves one) and a
+checkout git cannot read both fail the run with what to do, and the
+checkout is kept. One `corpus add` per corpus runs at a time: a second is
+refused.
+
 A local path (`/path/to/checkout` or `file:///path/to/checkout`) is cloned the
 same way. Git checks out committed files only, so a root `.xerjignore` that is
 untracked or has uncommitted edits would never reach the clone, and the index

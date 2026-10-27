@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Re-running `xerj corpus add` after a clone was stopped partway (an agent's
+  tool timeout) now finishes that clone instead of recording it as
+  `[skip] already cloned` with no files and `sha: unknown` (#2453). A clone
+  stopped before its first checkout is cloned again (`[reclone]`); one
+  stopped while writing files is restored in place (`[repair]`), offline
+  unless it is pinned. A leftover `.git/index.lock` (a hard kill leaves
+  one), or a checkout git cannot read, fails the run with what to do and
+  keeps the checkout. A second `corpus add` on the same corpus is refused
+  while one runs.
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This

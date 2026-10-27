@@ -720,6 +720,94 @@ fn paths_note(paths: &[String]) -> String {
     }
 }
 
+/// What a clone killed partway left behind (#2453).
+enum Unfinished {
+    /// Killed in `git init` (no `.git/objects` yet) or before its first
+    /// checkout (no commit at HEAD, no index): nothing usable.
+    NoCommit,
+    /// HEAD names a commit but there is no index: the files were not all
+    /// written.
+    Checkout,
+    /// `.git/index.lock` is left, by a git that was stopped or is running.
+    Locked,
+    /// git cannot read the repository; git's message.
+    Unreadable(String),
+}
+
+/// Whether a checkout with a `.git` directory is a finished clone (`None`).
+/// A clone killed before its first checkout has no commit at HEAD and no
+/// index; one killed while writing files has a commit and no index, or
+/// `.git/index.lock` if git had no time to remove it. A checkout that has
+/// an index but whose HEAD does not resolve to a commit (a lost object, a
+/// broken ref) finished once and is not ours to replace. `--git-dir` stops
+/// git from walking up to an enclosing repository.
+fn unfinished_clone(target: &Path) -> Option<Unfinished> {
+    // `git init` stopped before it made `.git/objects`: nothing was fetched,
+    // and git does not take the folder for a repository at all.
+    if !target.join(".git/objects").is_dir() {
+        return Some(Unfinished::NoCommit);
+    }
+    if target.join(".git/index.lock").exists() {
+        return Some(Unfinished::Locked);
+    }
+    let has_index = target.join(".git/index").exists();
+    let rev = |spec: &str| {
+        git(
+            Some(target),
+            &["--git-dir=.git", "rev-parse", "--verify", "--quiet", spec],
+        )
+    };
+    let unreadable = |out: &str| {
+        let why = out.lines().next().unwrap_or("").trim();
+        Some(Unfinished::Unreadable(if why.is_empty() {
+            "HEAD names no readable commit".to_string()
+        } else {
+            why.chars().take(200).collect()
+        }))
+    };
+    // `HEAD` alone reads the ref, not the object: exit 1 is an unborn HEAD.
+    match rev("HEAD") {
+        Ok((0, _)) => {}
+        Ok((1, _)) if !has_index => return Some(Unfinished::NoCommit),
+        Ok((_, out)) => return unreadable(&out),
+        Err(e) => return unreadable(&format!("{e:#}")),
+    }
+    match rev("HEAD^{commit}") {
+        Ok((0, _)) => {}
+        Ok((_, out)) => return unreadable(&out),
+        Err(e) => return unreadable(&format!("{e:#}")),
+    }
+    if !has_index {
+        return Some(Unfinished::Checkout);
+    }
+    None
+}
+
+/// One `corpus add` per corpus at a time (#2453): a second run would
+/// otherwise take the first one's clone in progress for an unfinished one.
+/// Released when the returned file is dropped.
+fn lock_corpus_add(root: &Path, name: &str) -> Result<std::fs::File> {
+    let dir = root.join("locks");
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let path = dir.join(format!("corpus-add-{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!(
+            "corpus '{name}' is being written by another `xerj corpus add` (lock: {}). \
+             Run this again when it finishes.",
+            path.display()
+        ),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("cannot lock {}", path.display()))),
+    }
+}
+
 fn dir_stats(target: &Path) -> (String, u64, u64) {
     let sha = git(Some(target), &["rev-parse", "HEAD"])
         .ok()
@@ -1134,6 +1222,13 @@ fn run_corpus_add(args: &[String]) -> i32 {
 
     let root = code_root();
     let dest = root.join("corpora").join(&name);
+    let _lock = match lock_corpus_add(&root, &name) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 1;
+        }
+    };
     // A corpus name is EITHER a cloned-repo corpus or a harvested one.
     // Cloning repos into a harvested corpus's dir would corrupt both views:
     // the manifest's pseudo-repos would sit beside real clones, and
@@ -1215,12 +1310,63 @@ fn run_corpus_add(args: &[String]) -> i32 {
                 },
             );
         };
+        // #2453: a clone killed partway (an agent's tool timeout) leaves a
+        // `.git` behind, and trusting it records an empty or partial repo.
+        // Killed before its first checkout there is nothing to keep, so it is
+        // cloned again; killed while writing files, everything is on disk
+        // and the files are restored in place, offline. A leftover
+        // `.git/index.lock` may belong to a git that is still running, and a
+        // repository git cannot read is not provably ours to replace: both
+        // fail with what to do, and the checkout is kept.
+        let mut restore_pin = false;
+        if target.join(".git").is_dir() {
+            let fail = match unfinished_clone(&target) {
+                None => None,
+                Some(Unfinished::NoCommit) => {
+                    println!("  [reclone] {repo_name}: no commit yet (clone stopped early, or the remote is empty); cloning again");
+                    std::fs::remove_dir_all(&target)
+                        .err()
+                        .map(|e| format!("cannot remove {}: {e}", target.display()))
+                }
+                Some(Unfinished::Checkout) => {
+                    println!("  [repair] {repo_name}: unfinished checkout (no .git/index); restoring files");
+                    if !sha.is_empty() {
+                        restore_pin = true;
+                        None
+                    } else if matches!(
+                        git(Some(&target), &["reset", "--hard", "--quiet", "HEAD"]),
+                        Ok((0, _))
+                    ) {
+                        None
+                    } else {
+                        Some(format!(
+                            "could not restore files; kept {}",
+                            target.display()
+                        ))
+                    }
+                }
+                Some(Unfinished::Locked) => Some(format!(
+                    "{} is left by a git that was stopped or is still running; \
+                     if no git is running, delete it and run this again",
+                    target.join(".git/index.lock").display()
+                )),
+                Some(Unfinished::Unreadable(why)) => Some(format!(
+                    "git cannot read {} ({why}); remove it to clone again",
+                    target.display()
+                )),
+            };
+            if let Some(e) = fail {
+                eprintln!("  [FAIL] {repo_name}: {e}; continuing");
+                skipped.push(repo_name);
+                continue;
+            }
+        }
         if target.join(".git").exists() && !sha.is_empty() {
             let at = git(Some(&target), &["rev-parse", "HEAD"])
                 .ok()
                 .filter(|(rc, _)| *rc == 0)
                 .map(|(_, out)| out);
-            if at.as_deref() == Some(sha.as_str()) {
+            if at.as_deref() == Some(sha.as_str()) && !restore_pin {
                 // HEAD matching the pin is not the harvest. A previous run
                 // may have checked out the whole repo; `paths` still has to
                 // narrow it, and a manifest that dropped `paths` has to
@@ -1524,6 +1670,13 @@ fn run_corpus_add_pack(
     }
     let root = code_root();
     let dest = root.join("corpora").join(&name);
+    let _lock = match lock_corpus_add(&root, &name) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 1;
+        }
+    };
     // Same one-kind-per-name rule the git arm enforces, from the other side.
     let previous_own = manifest::read_corpus_manifest(&dest.join("corpus.json"))
         .ok()
@@ -5395,6 +5548,334 @@ precedence = ["a", "b"]
         assert_eq!(rc, 0, "{sha}");
         assert_eq!(sha.len(), 40, "{sha}");
         sha
+    }
+
+    // ── corpus add over a clone killed partway (#2453) ─────────────────────
+
+    /// Leaves `checkout` as a `git checkout` stopped partway does: no index,
+    /// with `missing` not yet written. (SIGTERM lets git remove its
+    /// `.git/index.lock`; SIGKILL leaves it, see the refusal test.)
+    fn kill_mid_checkout(checkout: &Path, missing: &str) {
+        std::fs::remove_file(checkout.join(missing)).unwrap();
+        std::fs::remove_file(checkout.join(".git/index")).unwrap();
+    }
+
+    /// `git clone` killed while fetching leaves a `.git` with no commit and
+    /// no files. A re-run clones it again instead of recording an empty repo
+    /// as "already cloned".
+    #[test]
+    fn corpus_add_reclones_a_clone_killed_before_its_first_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/partial/widget");
+        std::fs::create_dir_all(&clone).unwrap();
+        let (rc, out) = git(Some(&clone), &["init", "--quiet"]).unwrap();
+        assert_eq!(rc, 0, "git init: {out}");
+
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+        let recorded =
+            manifest::read_corpus_manifest(&home.path().join("corpora/partial/corpus.json"))
+                .unwrap();
+        assert_eq!(recorded.repos[0].sha, head_sha(&origin));
+        assert_eq!(recorded.repos[0].files, Some(1));
+    }
+
+    /// Killed inside `git init`, before `.git/objects` exists, git cannot
+    /// read the folder at all; it is still a clone with nothing in it.
+    #[test]
+    fn corpus_add_reclones_a_clone_killed_during_git_init() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/partial/widget");
+        std::fs::create_dir_all(&clone).unwrap();
+        let (rc, out) = git(Some(&clone), &["init", "--quiet"]).unwrap();
+        assert_eq!(rc, 0, "git init: {out}");
+        std::fs::remove_dir_all(clone.join(".git/objects")).unwrap();
+        std::fs::write(clone.join(".git/config.lock"), "").unwrap();
+
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// Killed while checking out, the clone already holds every object, so
+    /// its files are restored in place without the network: the origin is
+    /// gone before the re-run. A finished clone is still left as it is.
+    #[test]
+    fn corpus_add_restores_a_clone_killed_mid_checkout_offline() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["mid".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/mid/widget");
+        assert_eq!(add(), 0);
+
+        std::fs::write(clone.join("marker"), "kept\n").unwrap();
+        assert_eq!(add(), 0);
+        assert!(
+            clone.join("marker").exists(),
+            "a finished clone is not touched"
+        );
+
+        kill_mid_checkout(&clone, "b.txt");
+        std::fs::rename(&origin, home.path().join("gone")).unwrap();
+        assert_eq!(add(), 0);
+        assert_eq!(std::fs::read_to_string(clone.join("b.txt")).unwrap(), "b\n");
+        assert!(clone.join("marker").exists(), "repaired, not cloned again");
+        let recorded =
+            manifest::read_corpus_manifest(&home.path().join("corpora/mid/corpus.json")).unwrap();
+        // a.txt, b.txt and the marker: every file on disk is counted.
+        assert_eq!(recorded.repos[0].files, Some(3));
+    }
+
+    /// A leftover `.git/index.lock` may belong to a git that is still
+    /// running, so the run fails with what to do and touches nothing. Once
+    /// the lock is removed, the next run restores the files.
+    #[test]
+    fn corpus_add_refuses_a_checkout_left_with_index_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["locked".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/locked/widget");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&clone, "b.txt");
+        std::fs::write(clone.join(".git/index.lock"), "").unwrap();
+        assert_eq!(add(), 1);
+        assert!(
+            clone.join(".git/index.lock").exists(),
+            "the lock is not deleted"
+        );
+        assert!(!clone.join("b.txt").exists());
+
+        std::fs::remove_file(clone.join(".git/index.lock")).unwrap();
+        assert_eq!(add(), 0);
+        assert_eq!(std::fs::read_to_string(clone.join("b.txt")).unwrap(), "b\n");
+    }
+
+    /// When the files cannot be restored the run fails and the checkout,
+    /// with every object in it, is kept for the next try.
+    #[cfg(unix)]
+    #[test]
+    fn corpus_add_keeps_a_checkout_it_cannot_restore() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["stuck".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/stuck/widget");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&clone, "b.txt");
+        let mode = |m| std::fs::set_permissions(&clone, std::fs::Permissions::from_mode(m));
+        mode(0o555).unwrap();
+        // root ignores the mode; there is no failure to provoke.
+        let read_only = std::fs::write(clone.join("probe"), "").is_err();
+        let rc = add();
+        mode(0o755).unwrap();
+        if read_only {
+            assert_eq!(rc, 1);
+            assert!(clone.join(".git").is_dir(), "the checkout is kept");
+            assert!(clone.join("a.txt").exists());
+        }
+    }
+
+    /// A pinned checkout stopped before its first checkout finished has no
+    /// commit at HEAD and no index. It is now fetched and checked out again
+    /// instead of recorded as it is.
+    #[test]
+    fn corpus_add_from_reclones_a_pin_killed_mid_checkout() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[("LICENSE", "bsd\n"), ("src/a.rs", "fn a() {}\n")],
+        );
+        let manifest = home.path().join("pin.json");
+        write_pin(
+            &manifest,
+            &origin.display().to_string(),
+            &head_sha(&origin),
+            None,
+        );
+        let add = || run_corpus_add(&["--from".into(), manifest.display().to_string()]);
+        let checkout = home.path().join("corpora/sparse-demo/vulndb");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&checkout, "src/a.rs");
+        std::fs::write(checkout.join(".git/HEAD"), "ref: refs/heads/unborn\n").unwrap();
+        assert_eq!(add(), 0);
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["LICENSE".to_string(), "src/a.rs".to_string()]
+        );
+        assert!(!checkout.join(".git/index.lock").exists());
+    }
+
+    /// HEAD at the pin with no index is checked out again, not reported as
+    /// "already at" the sha with files missing.
+    #[test]
+    fn corpus_add_from_restores_a_pin_left_without_an_index() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[("LICENSE", "bsd\n"), ("src/a.rs", "fn a() {}\n")],
+        );
+        let manifest = home.path().join("pin.json");
+        write_pin(
+            &manifest,
+            &origin.display().to_string(),
+            &head_sha(&origin),
+            None,
+        );
+        let add = || run_corpus_add(&["--from".into(), manifest.display().to_string()]);
+        let checkout = home.path().join("corpora/sparse-demo/vulndb");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&checkout, "src/a.rs");
+        assert_eq!(add(), 0);
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["LICENSE".to_string(), "src/a.rs".to_string()]
+        );
+    }
+
+    /// A checkout git cannot read at all (exit 128, not "no commit") is not
+    /// proof of a killed clone: the run fails and leaves it exactly as it is,
+    /// instead of recording it as already cloned. Removing it, as the error
+    /// says, lets the next run clone it.
+    #[test]
+    fn corpus_add_fails_on_a_checkout_git_cannot_read() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let add = || run_corpus_add(&["odd".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/odd/widget");
+        assert_eq!(add(), 0);
+        std::fs::write(clone.join(".git/HEAD"), "garbage\n").unwrap();
+        std::fs::write(clone.join("marker"), "kept\n").unwrap();
+        assert_eq!(add(), 1);
+        assert!(
+            clone.join("marker").exists(),
+            "an unreadable checkout is not deleted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join(".git/HEAD")).unwrap(),
+            "garbage\n"
+        );
+
+        // The recovery the error names: remove it, and the next run clones.
+        std::fs::remove_dir_all(&clone).unwrap();
+        assert_eq!(add(), 0);
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// A finished clone that lost its HEAD commit object still has its
+    /// files and index: git cannot read it, so the run fails and keeps it
+    /// instead of deleting it as a clone that never got a commit.
+    #[test]
+    fn corpus_add_fails_on_a_clone_missing_its_head_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let add = || run_corpus_add(&["lost".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/lost/widget");
+        assert_eq!(add(), 0);
+        std::fs::remove_dir_all(clone.join(".git/objects")).unwrap();
+        std::fs::create_dir(clone.join(".git/objects")).unwrap();
+        assert_eq!(add(), 1);
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// A `.git` file (a linked worktree) has no `.git/index` of its own and
+    /// is never ours: it is left alone, not taken for an unfinished clone.
+    #[test]
+    fn corpus_add_leaves_a_linked_worktree_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/linked/widget");
+        let clone_s = clone.display().to_string();
+        let (rc, out) = git(Some(&origin), &["worktree", "add", "--quiet", &clone_s]).unwrap();
+        assert_eq!(rc, 0, "git worktree add: {out}");
+        std::fs::write(clone.join("keep.txt"), "edited\n").unwrap();
+
+        assert_eq!(
+            run_corpus_add(&["linked".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "edited\n"
+        );
+        assert!(clone.join(".git").is_file());
+    }
+
+    /// A second `corpus add` of the same corpus refuses while the first holds
+    /// the lock, and touches nothing.
+    #[test]
+    fn corpus_add_refuses_while_another_run_holds_the_corpus() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let held = lock_corpus_add(home.path(), "busy").unwrap();
+        assert_eq!(
+            run_corpus_add(&["busy".into(), origin.display().to_string()]),
+            1
+        );
+        assert!(!home.path().join("corpora/busy/widget").exists());
+        drop(held);
+        assert_eq!(
+            run_corpus_add(&["busy".into(), origin.display().to_string()]),
+            0
+        );
+    }
+
+    /// `corpus add --from <pack>` takes the same lock.
+    #[test]
+    fn corpus_add_from_pack_refuses_while_another_run_holds_the_corpus() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+        let add = || run_corpus_add(&["--from".to_string(), pack.display().to_string()]);
+        let held = lock_corpus_add(home.path(), "demo").unwrap();
+        assert_eq!(add(), 1);
+        assert!(!home.path().join("corpora/demo").exists());
+        drop(held);
+        assert_eq!(add(), 0);
     }
 
     #[test]
