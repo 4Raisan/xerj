@@ -112,6 +112,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj_batch_search` (and `xerj batch-search`) accept a plain string in
+  `queries` as shorthand for `{"query": <string>}` (#2497). A string item
+  used to fail alone with "arguments must be a JSON object", so an agent
+  that sent `["a", "b"]` lost a call; the advertised schema now allows it.
+
 - `xerj code` shows the part of a long definition that matched the query,
   not its first `--full` characters (#2464). The matching text could sit
   thousands of characters below the signature, so a hit named the right
