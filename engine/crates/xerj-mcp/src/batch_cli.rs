@@ -15,6 +15,7 @@ Read one JSON object (at most 1 MiB) using the xerj_batch_search schema:
   ]}
 
 queries: 1..50 objects, each query (text or ES query clause) OR identifier+field.
+A plain string item is shorthand for {\"query\": <string>}.
 Exact identifiers require a flat indexed keyword field. index/prefix, size
 (1..50, default 3) and optional max_tokens are shared by all items.
 Output is one JSON object with ordered results; position is zero-based and

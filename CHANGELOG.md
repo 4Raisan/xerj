@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Index deletion no longer waits for unrelated index statistics while
+  resolving its selectors. Index listings and health checks also release
+  their index-map locks before awaiting statistics, so a stalled schema
+  update does not hold those locks against DELETE (part of #2405; extracted
+  from #2489). Merge/flush cancellation and the process memory cap remain
+  separate follow-ups.
+- `xerj autoindex` compresses per-file phase-B stages with zstd level 1 and
+  uses temporary files cleaned up by the operating system when the client
+  exits (#2493, part of #2427). It finishes buffered compression before
+  deleting previous records, so a stage finalization error preserves the old
+  records and an ordinary resume can complete the replacement. Compression
+  savings depend on the data; this does not impose a disk or server-memory cap.
+- `autoindex` bulk back-pressure patience is now measured since the last
+  progress, not since the first round. A window the server drains a few
+  records at a time (per-item 429 `resource_exhausted` on an embedding
+  deadline or admission refusal) used to abort with `bulk backend failed`
+  once the rounds together passed the 600 s `THROTTLE_PATIENCE`, even though
+  every round settled records. Each round that settles at least one item now
+  restarts the patience clock and the backoff; rounds that settle nothing
+  still count, so a server that answers 429 forever fails at the same limits
+  as before.
+- `xerj autoindex` titles a prose file that opens with YAML frontmatter from
+  its `title:` key, or from the first line after the closing `---` when there
+  is none (#2556). Every such file (Jekyll, Hugo, Obsidian) used to be titled
+  `---`, its opening fence. A leading `---` block that is not parseable
+  frontmatter (unclosed, not a YAML mapping, over 64 KiB) takes the first line
+  that is not a bare `---`; the body, the frontmatter text in it and
+  `start_line` are unchanged. An unchanged file is not re-extracted, so re-index
+  with `xerj autoindex --fresh` to retitle documents already in an index.
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
@@ -17,8 +49,9 @@ return (#2443, #2434, #2454, #2465). Search keeps its own share of the memory
 budget while merges run (#2484, #2485), autoindex plans large folders in
 bounded memory with fewer, larger datasets (#2417, #2430), and a
 `semantic_text` test segment shrinks from 20.1 MB to 1.8 MB on disk
-(#2471). Every release candidate now passes a performance gate with autoindex and search budgets
-and an Elasticsearch floor before it ships (#2432). Thank you to everyone
+(#2471). A local performance harness adds autoindex and search budgets and an
+Elasticsearch floor (#2432); release-workflow integration remains open in
+#2433. Thank you to everyone
 who filed a field report: they shaped this release. The memory-ceiling work
 continues in #2427 and #1122, which stay open.
 
@@ -126,9 +159,9 @@ continues in #2427 and #1122, which stay open.
 
 - **Release performance gate** for autoindex and search. It adds
   `gen_corpus.py`, `autoindex_release_gate.sh` and `gate.py`, with per-phase
-  budgets, an Elasticsearch floor and an rc.99 comparison harness, and it
-  runs before a release is cut (#2432). The live-tree memory follow-up is
-  tracked in #2433, which stays open.
+  budgets, an Elasticsearch floor and an rc.99 comparison harness (#2432).
+  Release-workflow wiring and the live-tree memory follow-up remain pending
+  in #2433; the harness is currently available for local runs.
 
 - `xerj init` prints the Kimi CLI MCP config path (`~/.kimi-code/mcp.json`),
   and the README marks the Kimi CLI row as tested (#2386).
@@ -153,6 +186,31 @@ continues in #2427 and #1122, which stay open.
   [#2433](https://github.com/xerj-org/xerj/issues/2433)).
 
 ### Fixed
+
+- A `semantic_text` field declared without `dimensions` is now sized at the
+  width the server's embedding backend actually produces, when that width is
+  confirmed (#2407, defect 1). It used to be always 384, so behind a `proxy`
+  returning another width (768, 1024, …) every document failed ingest with
+  "embedding backend returned width N, mapping requires 384", and the new
+  index stayed green with no semantic documents. Index creation,
+  `PUT _mapping` and templates (including indices that `_bulk` creates
+  automatically) write the width into the mapping, so `GET _mapping` shows it.
+  An explicit `dimensions` still wins. Indices created before this change keep
+  their stored 384 mapping. Re-declaring a bare `semantic_text` on one of them
+  while running a backend of another width is now refused by the immutable
+  embedding contract. When the width cannot be confirmed, the field is still
+  sized at 384, and the server logs a warning.
+
+- `xerj search` names an unknown flag on one line and exits 2 instead of
+  following "unexpected argument" with the whole usage text (#2458). An
+  agent that guessed `--index` and `--max-hits` read the help dump as the
+  answer and gave up on the CLI. Those guesses, and `--size`, `--limit`,
+  `--top`, `--top-k`, `-n` and `-i`, now point at `--prefix <P>` or
+  `-k <N>`.
+- `xerj_batch_search` (and `xerj batch-search`) accept a plain string in
+  `queries` as shorthand for `{"query": <string>}` (#2497). A string item
+  used to fail alone with "arguments must be a JSON object", so an agent
+  that sent `["a", "b"]` lost a call; the advertised schema now allows it.
 
 - `xerj corpus add` accepts a local Windows path such as
   `F:\Projects\Foo` (#2472). The repo name was the text after the last `/`,
