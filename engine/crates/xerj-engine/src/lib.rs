@@ -30,6 +30,7 @@ pub mod index_guard;
 pub mod ingest_memory;
 pub mod lifecycle;
 pub mod memtable;
+mod merge_budget;
 mod merge_reserve;
 mod node_lock;
 pub mod painless;
@@ -264,6 +265,22 @@ pub(crate) fn merge_pool() -> pools::PoolCall {
 pub(crate) fn flush_finalize_gate() -> &'static tokio::sync::Semaphore {
     static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
     GATE.get_or_init(|| tokio::sync::Semaphore::new(crate::pools::sizing().flush_finalize))
+}
+
+/// One permit: while the parent RSS breaker is engaged, flush finalizes
+/// (segment build, FST build, doc-values encode) also take this, so only one
+/// runs at a time (#2427).
+///
+/// [`flush_finalize_gate`] allows `max(2, ncores/8)` concurrent finalizes.
+/// Each holds a frozen memtable plus its FST and column build buffers. Under
+/// the breaker, those buffers stacked on a node that was already at the
+/// watermark: RSS climbed about 1 GB past a 3,000 MB cap while writes were
+/// already getting 429s. Serializing them while the breaker is engaged bounds
+/// the overshoot to one build. The drain still makes progress; it just does
+/// not multiply the peak.
+pub(crate) fn flush_pressure_gate() -> &'static tokio::sync::Semaphore {
+    static GATE: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    GATE.get_or_init(|| tokio::sync::Semaphore::new(1))
 }
 
 // ── Analyzer helpers ──────────────────────────────────────────────────────────

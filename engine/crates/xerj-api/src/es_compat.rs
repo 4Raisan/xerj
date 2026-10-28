@@ -1512,12 +1512,22 @@ pub async fn create_index(
     // (#2281). A schema-only pass cannot: the stored mapping was the request
     // body, so a template `semantic_text` was rendered back as `object`, and
     // the template's settings were never copied.
-    let (mappings_val, merged_settings) = state.engine.merge_index_template(
+    let (mut mappings_val, merged_settings) = state.engine.merge_index_template(
         &index,
         body.get("mappings").cloned().unwrap_or(Value::Null),
         body.get("settings").cloned().unwrap_or(Value::Null),
     );
     let settings_ref = (!merged_settings.is_null()).then_some(&merged_settings);
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, schema build and the
+    // mapping's persistence all read this merged value.
+    if let Some(props) = mappings_val.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
+        }
+    }
 
     // Validate mapping field types before creating — ES returns
     // mapper_parsing_exception for unsupported types.
@@ -2605,8 +2615,10 @@ pub async fn delete_index(
         .map(|v| v == "true")
         .unwrap_or(true);
 
-    let all = state.engine.list_indices().await;
-    let mut all_names: Vec<String> = all.iter().map(|i| i.name.clone()).collect();
+    // Selector resolution needs names, not statistics. Waiting for every
+    // sibling's schema/memtable locks can stall an otherwise independent
+    // DELETE before it even reaches the requested index (#2405).
+    let mut all_names = state.engine.index_name_list();
     // A failed index is deletable. Its name has to take part in selector
     // resolution or a literal `DELETE /broken` 404s and a wildcard silently
     // skips it — which is exactly the stuck state issue #206 describes.
@@ -3128,7 +3140,7 @@ pub struct EsPutMappingBody {
 pub async fn put_mapping(
     State(state): State<AppState>,
     Path(index): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     // Wildcard-expand index list.
     let targets = resolve_index_selector(&state, &index).await;
@@ -3179,6 +3191,16 @@ pub async fn put_mapping(
                 )
                     .into_response();
             }
+        }
+    }
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, the field parse and the
+    // merge into each target's stored mapping all read the request body.
+    if let Some(props) = body.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
         }
     }
 
@@ -3432,6 +3454,60 @@ fn embedder_warnings(state: &AppState, body: &Value) -> Vec<String> {
         proxy_endpoint: embedding.default_endpoint.clone(),
     };
     crate::embed_warning::semantic_embedder_warnings(body, &resolved)
+}
+
+/// True when `properties` (recursively) declares a `semantic_text` field
+/// without an explicit `dimensions`/`dims` — the shape #2407 is about.
+fn properties_have_bare_semantic_text(properties: &Value) -> bool {
+    let Some(obj) = properties.as_object() else {
+        return false;
+    };
+    obj.values().any(|spec| {
+        (spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none())
+            || spec
+                .get("properties")
+                .is_some_and(properties_have_bare_semantic_text)
+    })
+}
+
+/// Write `dimensions` into every bare `semantic_text` property, recursively.
+///
+/// #2407: a bare `semantic_text` was always sized at 384 (the built-in
+/// embedder's width) even when the server's own backend returns another
+/// width, so every document failed ingest with "embedding backend returned
+/// width N, mapping requires 384" and the just-created index sat green with
+/// 0 documents. Materializing the width into the mapping at creation time
+/// keeps the embedding contract explicit and immutable as designed, makes
+/// `GET _mapping` echo the real width, and leaves an explicit declaration
+/// untouched.
+fn materialize_semantic_dimensions(properties: &mut Value, dimensions: usize) {
+    let Some(obj) = properties.as_object_mut() else {
+        return;
+    };
+    for spec in obj.values_mut() {
+        if spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none()
+        {
+            if let Some(map) = spec.as_object_mut() {
+                map.insert("dimensions".into(), json!(dimensions));
+            }
+        }
+        if let Some(sub) = spec.get_mut("properties") {
+            materialize_semantic_dimensions(sub, dimensions);
+        }
+    }
+}
+
+/// The width this server's embedding backend actually produces: the confirmed
+/// identity width (for `proxy` this runs the #2306 probe, cached after the
+/// first confirmation), else 384 with a warning — the built-in default a bare
+/// mapping was always sized at. Resolved only when a mapping actually carries
+/// a bare `semantic_text`, so mappings without one never pay for a probe.
+fn confirmed_semantic_dimensions(state: &AppState) -> usize {
+    state.engine.confirmed_semantic_dimensions()
 }
 
 fn semantic_mapping_contract(
@@ -3973,12 +4049,32 @@ pub(crate) fn document_body(doc: &Value) -> bytes::Bytes {
 /// JSON extractor's extra validation pass and parse directly with simd_json /
 /// serde_json.  No schema validation is performed here; the engine layer handles
 /// all type coercion.  This shaves ~15–30 µs of extractor overhead per doc.
+/// Resolve an alias to the concrete index a document write must land in.
+/// A concrete name (or a name that will be auto-created) is returned
+/// unchanged; an ambiguous alias becomes ES's 400
+/// `illegal_argument_exception` instead of silently using the first backing
+/// index (`GET /{index}` does resolve aliases that way, but a write may not).
+fn write_target_or_refusal(
+    state: &AppState,
+    index: &str,
+) -> std::result::Result<String, axum::response::Response> {
+    match state.engine.write_target(index) {
+        Ok(Some(target)) => Ok(target),
+        Ok(None) => Ok(index.to_string()),
+        Err(reason) => Err(es_bad_request("illegal_argument_exception", &reason, None)),
+    }
+}
+
 pub async fn index_doc_auto(
     State(state): State<AppState>,
     Path(index): Path<String>,
     Query(params): Query<IndexDocAutoParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::new(e).into_response(),
@@ -4132,6 +4228,10 @@ pub async fn index_doc(
     Query(params): Query<IndexDocParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // Size check before the DOM exists. See [`parse_indexed_document_body`].
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
@@ -4343,6 +4443,10 @@ pub async fn create_doc(
     Query(params): Query<CreateDocParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::new(e).into_response(),
@@ -4501,6 +4605,126 @@ mod oversized_single_doc {
     }
 }
 
+#[cfg(test)]
+mod oversized_update {
+    use super::*;
+    use axum::body::{to_bytes, Body};
+    use axum::http::Request;
+    use tower::ServiceExt;
+    use xerj_common::config::{Config, WalSync};
+    use xerj_common::document_limit::MAX_UPDATE_BODY_BYTES;
+    use xerj_common::metrics::Metrics;
+    use xerj_engine::Engine;
+
+    fn test_state() -> AppState {
+        let dir = tempfile::tempdir().expect("tempdir").keep();
+        let mut config = Config::default();
+        config.server.data_dir = dir.to_string_lossy().into_owned();
+        config.storage.wal_sync = WalSync::Async;
+        let metrics = Metrics::new().expect("metrics");
+        let engine = Engine::new(config.clone()).expect("engine");
+        AppState::new(config, engine, metrics)
+    }
+
+    #[test]
+    fn an_oversized_update_body_is_refused_before_it_is_parsed() {
+        let body = vec![b'x'; MAX_UPDATE_BODY_BYTES + 1];
+        let err = parse_update_body(&body).unwrap_err();
+        let text = err.to_string();
+        assert!(text.contains(&MAX_UPDATE_BODY_BYTES.to_string()), "{text}");
+        assert!(text.contains("not parsed"), "{text}");
+        assert!(text.contains("not changed"), "{text}");
+        assert!(
+            !text.contains("invalid JSON"),
+            "the size check must run before parse: {text}"
+        );
+        let small = parse_update_body(br#"{"doc":{"name":"ada"}}"#).unwrap();
+        assert_eq!(small.doc.unwrap()["name"], "ada");
+    }
+
+    #[tokio::test]
+    async fn post_update_refuses_an_oversized_body_and_a_small_update_applies() {
+        let app = crate::router::build_es_compat_router(test_state());
+        let created = app
+            .clone()
+            .oneshot(
+                Request::put("/upd/_doc/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"name":"ada","n":1}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+
+        // Valid JSON, over the envelope. A parse-first path would accept
+        // the syntax and answer with the document ceiling (or index it).
+        // The size refusal names the update limit and does not say the
+        // body was invalid JSON.
+        let mut big = Vec::new();
+        big.extend_from_slice(br#"{"doc":{"blob":""#);
+        big.extend(std::iter::repeat_n(b'a', MAX_UPDATE_BODY_BYTES));
+        big.extend_from_slice(br#""}}"#);
+        let refused = app
+            .clone()
+            .oneshot(
+                Request::post("/upd/_update/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(big))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(refused.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains(&MAX_UPDATE_BODY_BYTES.to_string()), "{text}");
+        assert!(text.contains("not parsed"), "{text}");
+        assert!(text.contains("not changed"), "{text}");
+        assert!(
+            !text.contains("invalid JSON"),
+            "parsed before the size check: {text}"
+        );
+
+        let fetched = app
+            .clone()
+            .oneshot(Request::get("/upd/_doc/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let bytes = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let doc: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["_source"]["name"], json!("ada"));
+        assert_eq!(doc["_source"]["n"], json!(1));
+
+        let updated = app
+            .clone()
+            .oneshot(
+                Request::post("/upd/_update/1")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"doc":{"name":"ada2"}}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(updated.status(), StatusCode::OK);
+
+        let fetched = app
+            .oneshot(Request::get("/upd/_doc/1").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(fetched.status(), StatusCode::OK);
+        let bytes = to_bytes(fetched.into_body(), usize::MAX).await.unwrap();
+        let doc: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["_source"]["name"], json!("ada2"));
+        assert_eq!(
+            doc["_source"]["n"],
+            json!(1),
+            "fields the update did not name stay"
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // GET /{index}/_doc/{id}?_source_includes=f1,f2&_source_excludes=f3
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4523,6 +4747,10 @@ pub async fn get_doc(
     Path((index, id)): Path<(String, String)>,
     Query(params): Query<GetDocParams>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // A closed index rejects read/search ops with ES index_closed_exception.
     // Strict membership only — frozen/open indices are unaffected.
     if state.engine.closed_indices.contains_key(&index) {
@@ -4682,6 +4910,10 @@ pub async fn delete_doc(
     Path((index, id)): Path<(String, String)>,
     Query(params): Query<DeleteDocParams>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // Wire → internal seq translation, same convention as the index path.
     let if_seq_no_internal = params.if_seq_no.map(|s| s.saturating_add(1));
 
@@ -8520,6 +8752,12 @@ fn value_bearing_field_names(body: &EsSearchBody, fields: &[String]) -> Vec<Stri
         _ => names.extend(fields.iter().cloned()),
     }
     push_names(body.docvalue_fields.as_ref(), &mut names);
+    // `_passage` is computed by the engine into `hit.passage`, never read
+    // out of `_source`, so it cannot be dropped by a source filter. Counting
+    // it made every `fields: ["_passage"]` request with `_source` includes
+    // (the `xerj search` body) re-ask the engine for the whole document
+    // (#2422/#2423).
+    names.retain(|name| name != xerj_query::executor::PASSAGE_RESPONSE_FIELD);
     names
 }
 
@@ -10248,6 +10486,22 @@ fn referenced_or_recurse(v: &Value, out: &mut Vec<(String, String)>) {
 /// reasonable guess — and got a silent zero, because this corpus classifies
 /// Markdown as `txt-prose`/`txt-lines`. Discovering that cost the agent two
 /// round trips and a terms aggregation it had to think to write.
+/// Whether a response qualifies for the zero-hit `unknown_value` sample
+/// (#2451). Only a request that asked for hits (`size > 0`) and whose whole
+/// match set is empty: an empty page with a non-zero tracked total is a page
+/// past the end, not a wrong value, and a `size: 0` count/existence probe must
+/// stay as cheap as its own query — the sample is a 256-row full-source read.
+/// With `track_total_hits: false` the total is not authoritative, so the
+/// empty page (with `size > 0`) is the only signal, as before.
+fn zero_hit_value_sample_applies(
+    size: usize,
+    page_empty: bool,
+    total_count: u64,
+    track_total_disabled: bool,
+) -> bool {
+    size > 0 && page_empty && (track_total_disabled || total_count == 0)
+}
+
 fn unknown_value_hint(index: &str, field: &str, value: &str, present: &[String]) -> Value {
     json!({
         "hints": [{
@@ -10905,6 +11159,69 @@ mod search_response_hint_tests {
         let text = String::from_utf8(bytes.to_vec()).expect("utf8 response body");
         let json: Value = serde_json::from_str(&text).expect("valid JSON response body");
         (json, text)
+    }
+
+    fn has_unknown_value_hint(json: &Value) -> bool {
+        json["_xerj"]["hints"].as_array().is_some_and(|hints| {
+            hints
+                .iter()
+                .any(|h| h["code"].as_str() == Some("unknown_value"))
+        })
+    }
+
+    #[test]
+    fn zero_hit_value_sample_gates_on_the_match_set_not_the_page() {
+        // #2451: a `size: 0` probe never samples, hit or miss.
+        assert!(!super::zero_hit_value_sample_applies(0, true, 0, false));
+        assert!(!super::zero_hit_value_sample_applies(0, true, 7, false));
+        assert!(!super::zero_hit_value_sample_applies(0, true, 0, true));
+        // A page past the end of a non-empty match set is not a wrong value.
+        assert!(!super::zero_hit_value_sample_applies(10, true, 7, false));
+        // The case the hint exists for, tracked total or not.
+        assert!(super::zero_hit_value_sample_applies(10, true, 0, false));
+        assert!(super::zero_hit_value_sample_applies(10, true, 0, true));
+        assert!(!super::zero_hit_value_sample_applies(10, false, 3, false));
+    }
+
+    #[tokio::test]
+    async fn size_zero_term_probe_skips_the_unknown_value_sample() {
+        let state = test_state();
+        let mut schema = Schema::empty();
+        schema
+            .fields
+            .push(FieldConfig::new("kind", FieldType::Keyword));
+        state.engine.create_index("hint-probe", schema).unwrap();
+        let idx = state.engine.get_index("hint-probe").unwrap();
+        for (id, kind) in [("1", "alpha"), ("2", "beta")] {
+            idx.index_document(Some(id.into()), json!({ "kind": kind }))
+                .await
+                .unwrap();
+        }
+        idx.refresh().await.unwrap();
+        let router = crate::router::build_es_compat_router(state);
+
+        // A search that asked for hits and matched nothing keeps the hint.
+        let (json, _) = run_search(
+            &router,
+            "hint-probe",
+            json!({"size": 10, "query": {"term": {"kind": "gamma"}}}),
+        )
+        .await;
+        assert!(has_unknown_value_hint(&json), "hint expected: {json}");
+
+        // The autoindex existence-probe shape, miss and hit: an exact total,
+        // no sample (#2451).
+        for (value, total) in [("gamma", 0), ("alpha", 1)] {
+            let (json, _) = run_search(
+                &router,
+                "hint-probe",
+                json!({"size": 0, "track_total_hits": true,
+                       "query": {"term": {"kind": value}}}),
+            )
+            .await;
+            assert_eq!(json["hits"]["total"]["value"], total, "{json}");
+            assert!(!has_unknown_value_hint(&json), "no hint for size 0: {json}");
+        }
     }
 
     #[tokio::test]
@@ -12938,12 +13255,239 @@ async fn search_dispatch(
     principal: crate::auth::Principal,
     body: EsSearchJson,
 ) -> Response {
+    // #2400: `post_filter` narrows the hits, never the aggregations.
+    if let Some(split) = split_post_filter(&params, &body) {
+        return search_with_post_filter(state, index, params, principal, split).await;
+    }
+    search_routed(state, index, params, principal, body).await
+}
+
+/// One search through the cluster fan-out when it applies, else on this node.
+async fn search_routed(
+    state: AppState,
+    index: String,
+    params: EsSearchQueryParams,
+    principal: crate::auth::Principal,
+    body: EsSearchJson,
+) -> Response {
     if let Some(response) =
         crate::cluster_shard::fanout_search(&state, &index, &params, &principal, &body).await
     {
         return response;
     }
     search_impl(state, index, params, principal, body).await
+}
+
+/// The searches a request with `post_filter` becomes (#2400). Elasticsearch
+/// applies `post_filter` to the hits after the aggregations are computed, so
+/// a faceted UI can show a facet's other values while one is selected.
+///
+/// - `hits`: the query wrapped as `bool{must: [query], filter: [post_filter]}`,
+///   without aggregations. A filter clause does not score, so the hits, their
+///   scores and `hits.total` are what Elasticsearch returns.
+/// - `aggs`: when the request aggregates, the original request without
+///   `post_filter` and with `size: 0`, so the aggregations are exactly what
+///   they were before.
+struct PostFilterSplit {
+    hits: EsSearchBody,
+    aggs: Option<(EsSearchQueryParams, EsSearchBody)>,
+}
+
+/// `None` leaves the request as it is: no `post_filter`; a hybrid query, which
+/// `build_search_request` rejects beside `post_filter` (#943); or a `?q=`
+/// query, which replaces the body query this wraps.
+fn split_post_filter(params: &EsSearchQueryParams, body: &EsSearchJson) -> Option<PostFilterSplit> {
+    let original = body.0.as_ref()?;
+    let filter = original.post_filter.clone()?;
+    if params.q.is_some() {
+        return None;
+    }
+    let query = original
+        .query
+        .clone()
+        .unwrap_or_else(|| json!({ "match_all": {} }));
+    let hybrid = parse_request(&json!({ "query": query }))
+        .map(|req| req.query.contains_hybrid())
+        .unwrap_or(false);
+    if hybrid {
+        return None;
+    }
+
+    let mut hits = original.clone();
+    hits.post_filter = None;
+    hits.query = Some(json!({ "bool": { "must": [query], "filter": [filter] } }));
+    let had_aggs = hits.aggs.take().is_some();
+    let had_aggregations = hits.aggregations.take().is_some();
+
+    let aggs = (had_aggs || had_aggregations).then(|| {
+        let mut body = original.clone();
+        body.post_filter = None;
+        body.size = 0;
+        body.from = 0;
+        let mut params = params.clone();
+        // Query-string paging overrides the body, and a second scroll context
+        // would leak: this search only reads the aggregations.
+        params.size = Some("0".to_string());
+        params.from = None;
+        params.scroll = None;
+        (params, body)
+    });
+    Some(PostFilterSplit { hits, aggs })
+}
+
+/// Run the split searches and answer with the hits of one and the
+/// aggregations of the other. An error from either is returned as it is.
+async fn search_with_post_filter(
+    state: AppState,
+    index: String,
+    params: EsSearchQueryParams,
+    principal: crate::auth::Principal,
+    split: PostFilterSplit,
+) -> Response {
+    let hits_search = search_routed(
+        state.clone(),
+        index.clone(),
+        params,
+        principal.clone(),
+        EsSearchJson(Some(split.hits)),
+    );
+    let Some((aggs_params, aggs_body)) = split.aggs else {
+        return hits_search.await;
+    };
+    let aggs_search = search_routed(
+        state,
+        index,
+        aggs_params,
+        principal,
+        EsSearchJson(Some(aggs_body)),
+    );
+    let (hits_response, aggs_response) = tokio::join!(Box::pin(hits_search), Box::pin(aggs_search));
+    if !hits_response.status().is_success() {
+        return hits_response;
+    }
+    if !aggs_response.status().is_success() {
+        return aggs_response;
+    }
+
+    let (mut parts, hits_body) = hits_response.into_parts();
+    let read = |body: axum::body::Body| async move {
+        axum::body::to_bytes(body, usize::MAX)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    };
+    let (Some(mut merged), Some(aggs_value)) =
+        (read(hits_body).await, read(aggs_response.into_body()).await)
+    else {
+        return ApiError::new(xerj_common::XerjError::internal(
+            "post_filter: could not read the search responses to merge them",
+        ))
+        .into_response();
+    };
+    if let (Some(obj), Some(aggregations)) =
+        (merged.as_object_mut(), aggs_value.get("aggregations"))
+    {
+        obj.insert("aggregations".to_string(), aggregations.clone());
+    }
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(merged.to_string()))
+}
+
+#[cfg(test)]
+mod post_filter_split_tests {
+    use super::*;
+
+    fn body(v: Value) -> EsSearchJson {
+        EsSearchJson(Some(serde_json::from_value(v).expect("search body")))
+    }
+
+    #[test]
+    fn no_post_filter_is_left_alone() {
+        let params = EsSearchQueryParams::default();
+        assert!(split_post_filter(&params, &body(json!({"query": {"match_all": {}}}))).is_none());
+        assert!(split_post_filter(&params, &EsSearchJson(None)).is_none());
+    }
+
+    #[test]
+    fn hits_search_wraps_the_query_and_drops_aggregations() {
+        let params = EsSearchQueryParams::default();
+        let split = split_post_filter(
+            &params,
+            &body(json!({
+                "query": {"match": {"body": "alpha"}},
+                "post_filter": {"term": {"provenance": "draft"}},
+            })),
+        )
+        .expect("split");
+        assert_eq!(
+            split.hits.query,
+            Some(json!({"bool": {
+                "must": [{"match": {"body": "alpha"}}],
+                "filter": [{"term": {"provenance": "draft"}}],
+            }}))
+        );
+        assert!(split.hits.post_filter.is_none());
+        assert!(split.aggs.is_none(), "no aggregations, no second search");
+    }
+
+    #[test]
+    fn a_missing_query_is_match_all() {
+        let split = split_post_filter(
+            &EsSearchQueryParams::default(),
+            &body(json!({"post_filter": {"term": {"provenance": "draft"}}})),
+        )
+        .expect("split");
+        assert_eq!(
+            split.hits.query.unwrap()["bool"]["must"][0],
+            json!({"match_all": {}})
+        );
+    }
+
+    #[test]
+    fn aggregations_come_from_the_unfiltered_request_with_no_hits_and_no_scroll() {
+        let params = EsSearchQueryParams {
+            size: Some("25".into()),
+            from: Some("5".into()),
+            scroll: Some("1m".into()),
+            ..Default::default()
+        };
+        let split = split_post_filter(
+            &params,
+            &body(json!({
+                "query": {"match_all": {}},
+                "size": 25,
+                "post_filter": {"term": {"provenance": "draft"}},
+                "aggs": {"p": {"terms": {"field": "provenance"}}},
+            })),
+        )
+        .expect("split");
+        assert!(split.hits.aggs.is_none() && split.hits.aggregations.is_none());
+        let (aggs_params, aggs_body) = split.aggs.expect("an aggregation search");
+        assert!(aggs_body.post_filter.is_none());
+        assert_eq!(aggs_body.query, Some(json!({"match_all": {}})));
+        assert_eq!((aggs_body.size, aggs_body.from), (0, 0));
+        assert!(aggs_body.aggs.is_some());
+        assert_eq!(aggs_params.size.as_deref(), Some("0"));
+        assert!(aggs_params.from.is_none() && aggs_params.scroll.is_none());
+    }
+
+    #[test]
+    fn hybrid_and_query_string_requests_are_not_split() {
+        let hybrid = body(json!({
+            "query": {"hybrid": {"queries": [
+                {"query": {"match": {"body": "alpha"}}},
+                {"query": {"match": {"body": "beta"}}},
+            ]}},
+            "post_filter": {"term": {"provenance": "draft"}},
+        }));
+        assert!(split_post_filter(&EsSearchQueryParams::default(), &hybrid).is_none());
+        let q_param = EsSearchQueryParams {
+            q: Some("body:alpha".into()),
+            ..Default::default()
+        };
+        let with_filter = body(json!({"post_filter": {"term": {"provenance": "draft"}}}));
+        assert!(split_post_filter(&q_param, &with_filter).is_none());
+    }
 }
 
 /// One shard's search, used by the cluster fan-out. Does not fan out again.
@@ -12968,6 +13512,35 @@ pub(crate) async fn search_shard_local(
     .await
 }
 
+/// Heap-allocate the publish future before it is polled.
+///
+/// `publish_memtables_if_budget_engaged` awaits `Index::flush`. That future
+/// is large enough that building it inside `search_impl` overflows the worker
+/// stack (#2321). A sync function creates it here, on the task that is about
+/// to poll it, and only the box escapes.
+#[inline(never)]
+fn boxed_memtable_publish(
+    engine: std::sync::Arc<xerj_engine::Engine>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = usize> + Send>> {
+    Box::pin(async move { engine.publish_memtables_if_budget_engaged().await })
+}
+
+/// Publish memtables that are holding the process budget, on a fresh task.
+///
+/// A no-op — and no spawn — when the memtable breaker is off, so an ordinary
+/// search does not flush. The spawn keeps `Index::flush`'s frame off
+/// `search_impl`'s stack.
+async fn publish_engaged_memtables(engine: std::sync::Arc<xerj_engine::Engine>) {
+    if !xerj_engine::governor::global().is_some_and(|governor| governor.memtable_breaker_engaged())
+    {
+        return;
+    }
+    let _ = tokio::spawn(async move {
+        let _published = boxed_memtable_publish(engine).await;
+    })
+    .await;
+}
+
 async fn search_impl(
     state: AppState,
     index: String,
@@ -12979,6 +13552,10 @@ async fn search_impl(
     // Read once, before the first `.await`: what the in-process hub caller asked
     // of this search. A request off the wire gets the default and is unaffected.
     let in_process = in_process_search();
+    // #2321: a memtable sitting on the process budget is what a `{prefix}-*`
+    // search scans. Publish it before this request walks it. No-op unless
+    // that breaker is engaged. Read `in_process` first — it is task-local.
+    publish_engaged_memtables(std::sync::Arc::clone(&state.engine)).await;
     // Closed-index handling is deferred to after index resolution below so
     // `ignore_unavailable` / `expand_wildcards` are honored per ES semantics.
 
@@ -18565,7 +19142,22 @@ async fn search_impl(
             // and name the values that do exist. Only on zero hits, only for
             // exact clauses, and capped — this must never cost anything on a
             // query that worked.
-            if all_hints.is_empty() && hits.is_empty() {
+            //
+            // #2451: "zero hits" means the MATCH SET is empty, not the page. A
+            // `size: 0` request (a count or existence probe — autoindex's
+            // per-upsert `index_holds_content` is one) always has an empty
+            // page, so gating on `hits.is_empty()` alone ran the 256-row
+            // `match_all` sample — a full-source decode of ~356 rows, 1.4 s on
+            // a 234k-doc code index — after EVERY probe, hit or miss. The
+            // sample is for a caller who asked for hits and got none.
+            if all_hints.is_empty()
+                && zero_hit_value_sample_applies(
+                    body.size,
+                    hits.is_empty(),
+                    total_count,
+                    track_total_disabled,
+                )
+            {
                 let mut clauses = Vec::new();
                 if let Some(q) = body.query.as_ref() {
                     exact_term_clauses(q, &mut clauses);
@@ -20296,9 +20888,19 @@ async fn process_bulk_body(
         )
     });
 
-    let result =
-        xerj_engine::bulk::process_bulk_with_opts(&state.engine, default_index, text_ref, opts)
-            .await;
+    // Cluster mode routes each action to its shard primary and copies the
+    // stored document. No cluster handle: the local bulk pipeline, unchanged.
+    // `wire` is the primary's `_version` / `_seq_no`. The accepting node does
+    // not have the document, so the lookup below would report a fresh id.
+    let (result, wire) = if state.engine.has_cluster() {
+        crate::cluster_shard::bulk_on_primaries(state, default_index, text_ref, opts).await
+    } else {
+        (
+            xerj_engine::bulk::process_bulk_with_opts(&state.engine, default_index, text_ref, opts)
+                .await,
+            Vec::new(),
+        )
+    };
     let took_ms = result.took_ms;
     let errors = result.errors;
 
@@ -20323,7 +20925,7 @@ async fn process_bulk_body(
     let mut audited_index_names: std::collections::BTreeSet<String> =
         std::collections::BTreeSet::new();
     let mut items: Vec<EsBulkItem> = Vec::with_capacity(result.items.len());
-    for item in result.items {
+    for (ordinal, item) in result.items.into_iter().enumerate() {
         let failed = item.error.is_some() || !(200..300).contains(&item.status);
         if failed {
             failed_items += 1;
@@ -20345,6 +20947,13 @@ async fn process_bulk_body(
         // `status: 400` reads as "this write landed".
         let (version, seq_no, primary_term, shards) = if failed {
             (None, None, None, None)
+        } else if let Some((version, seq_no)) = wire.get(ordinal).copied().flatten() {
+            (
+                Some(version),
+                Some(seq_no),
+                Some(1),
+                Some(crate::responses::EsShards::single_success()),
+            )
         } else {
             let (version, seq_no) = state
                 .engine
@@ -20536,6 +21145,7 @@ fn bulk_item_error_type(e: &str) -> &'static str {
         || e.contains("missing document body")
         || e.contains("unknown action type")
         || e.contains("no write index is defined")
+        || e.contains("has more than one write index")
         || e.starts_with("pipeline with id")
     {
         "illegal_argument_exception"
@@ -22903,7 +23513,7 @@ fn format_date(dt: chrono::DateTime<chrono::Utc>, fmt: &str) -> String {
 // POST /{index}/_update/{id}
 // ─────────────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct EsUpdateBody {
     /// Partial document fields to merge into existing source.
     pub doc: Option<Value>,
@@ -22923,7 +23533,7 @@ pub struct EsUpdateBody {
 }
 
 /// Query parameters for the `_update` endpoint.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct UpdateDocParams {
     /// `refresh=true|wait_for` — accepted without error; memtable is always visible.
     pub refresh: Option<String>,
@@ -22984,15 +23594,84 @@ async fn build_update_get_field(
     }
 }
 
+/// Parse an `_update` body from raw bytes.
+///
+/// The size check runs before `serde_json`. The route used to take
+/// `Json<EsUpdateBody>`, so axum built the DOM before the handler. A body
+/// between this envelope and `limits.max_body_bytes` (100 MiB) was parsed
+/// even when it could not be applied, and that parse is an infallible
+/// allocation (`panic = "abort"`, #1122). Bytes that are not JSON and are
+/// also over the limit report the size refusal, not a parse error.
+pub(crate) fn parse_update_body(body: &[u8]) -> Result<EsUpdateBody, xerj_common::XerjError> {
+    if xerj_common::document_limit::update_body_too_large(body.len()) {
+        let len = body.len();
+        tracing::warn!(
+            bytes = len,
+            limit = xerj_common::document_limit::MAX_UPDATE_BODY_BYTES,
+            "update body refused before parse; the existing document was not changed (#1122)"
+        );
+        return Err(xerj_common::XerjError::invalid_document_json(
+            xerj_common::document_limit::update_body_refusal(len),
+        ));
+    }
+    serde_json::from_slice(body).map_err(|e| {
+        xerj_common::XerjError::invalid_document_json(format!("invalid JSON body: {e}"))
+    })
+}
+
+pub(crate) struct LocalUpdate {
+    pub response: axum::response::Response,
+    /// The primary stored a new source. A cluster caller copies it. A noop,
+    /// a miss, and every error leave this false.
+    pub replicate: bool,
+}
+
 pub async fn update_doc(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
     Query(query_params): Query<UpdateDocParams>,
-    Json(body): Json<EsUpdateBody>,
+    body: bytes::Bytes,
 ) -> impl IntoResponse {
-    let idx = match state.engine.get_or_create_index(&index) {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
+    // Before `get_or_create_index`, so a refused body does not create an
+    // index and does not read or write the document.
+    let body = match parse_update_body(&body) {
+        Ok(body) => body,
+        Err(e) => return ApiError::new(e).into_response(),
+    };
+    if state.engine.has_cluster() {
+        match crate::cluster_shard::dispatch_update(&state, &index, &id, &body, &query_params).await
+        {
+            crate::cluster_shard::Dispatch::Done(response) => return response,
+            crate::cluster_shard::Dispatch::Local => {}
+        }
+    }
+    apply_local_update(&state, &index, &id, body, &query_params)
+        .await
+        .response
+}
+
+pub(crate) async fn apply_local_update(
+    state: &AppState,
+    index: &str,
+    id: &str,
+    body: EsUpdateBody,
+    query_params: &UpdateDocParams,
+) -> LocalUpdate {
+    fn settled(response: impl IntoResponse, replicate: bool) -> LocalUpdate {
+        LocalUpdate {
+            response: response.into_response(),
+            replicate,
+        }
+    }
+    let idx = match state.engine.get_or_create_index(index) {
         Ok(i) => i,
-        Err(e) => return ApiError::new(xerj_common::XerjError::from(e)).into_response(),
+        Err(e) => {
+            return settled(ApiError::new(xerj_common::XerjError::from(e)), false);
+        }
     };
 
     // ── Scripted update path ────────────────────────────────────────────────
@@ -23002,7 +23681,10 @@ pub async fn update_doc(
     if let Some(script_val) = body.script.as_ref() {
         let (src, params) = extract_update_script(script_val);
         if src.is_empty() {
-            return update_script_bad_request("script source is required".to_string());
+            return settled(
+                update_script_bad_request("script source is required".to_string()),
+                false,
+            );
         }
         let upsert_body = body.upsert.clone().or_else(|| {
             if body.doc_as_upsert {
@@ -23018,7 +23700,7 @@ pub async fn update_doc(
         let (transformed, fault) = xerj_engine::painless::with_script_fault_capture(
             xerj_engine::painless::with_script_deadline(
                 deadline,
-                idx.transform_document_serialized(&id, upsert_body, move |mut current| {
+                idx.transform_document_serialized(id, upsert_body, move |mut current| {
                     apply_painless_update(&mut current, &src, &params)?;
                     Ok::<_, String>(current)
                 }),
@@ -23026,65 +23708,66 @@ pub async fn update_doc(
         )
         .await;
         if let Some(reason) = fault {
-            return script_limit_response(&reason);
+            return settled(script_limit_response(&reason), false);
         }
         match transformed {
             Ok(Ok(Some(outcome))) => {
-                state.metrics.record_doc_indexed(&index);
+                state.metrics.record_doc_indexed(index);
                 let resp = outcome.response;
                 let mut er = if outcome.created {
                     crate::responses::EsDocResponse::created(
-                        &index,
+                        index,
                         &resp.id,
                         resp.version,
                         resp.seq_no.saturating_sub(1),
                     )
                 } else {
                     crate::responses::EsDocResponse::updated(
-                        &index,
+                        index,
                         &resp.id,
                         resp.version,
                         resp.seq_no.saturating_sub(1),
                     )
                 };
-                if update_wants_get(&query_params) {
-                    er.get = Some(build_update_get_field(&idx, &resp.id, &query_params).await);
+                if update_wants_get(query_params) {
+                    er.get = Some(build_update_get_field(&idx, &resp.id, query_params).await);
                 }
-                return Json(er).into_response();
+                return settled(Json(er), true);
             }
             Ok(Ok(None)) => {
-                let e = xerj_common::XerjError::document_not_found(&id, &index);
-                return ApiError::new(e).into_response();
+                let e = xerj_common::XerjError::document_not_found(id, index);
+                return settled(ApiError::new(e), false);
             }
-            Ok(Err(error)) => return update_script_bad_request(error),
+            Ok(Err(error)) => return settled(update_script_bad_request(error), false),
             Err(error) => {
-                return ApiError::new(xerj_common::XerjError::from(error)).into_response();
+                return settled(ApiError::new(xerj_common::XerjError::from(error)), false);
             }
         }
     }
 
     match idx
-        .update_document_with_upsert(&id, body.doc, body.upsert, body.doc_as_upsert)
+        .update_document_with_upsert(id, body.doc, body.upsert, body.doc_as_upsert)
         .await
     {
         Ok(Some(resp)) => {
-            state.metrics.record_doc_indexed(&index);
+            let replicate = resp.result != "noop";
+            state.metrics.record_doc_indexed(index);
             let mut er = crate::responses::EsDocResponse::updated(
-                &index,
+                index,
                 &resp.id,
                 resp.version,
                 resp.seq_no.saturating_sub(1),
             );
-            if update_wants_get(&query_params) {
-                er.get = Some(build_update_get_field(&idx, &resp.id, &query_params).await);
+            if update_wants_get(query_params) {
+                er.get = Some(build_update_get_field(&idx, &resp.id, query_params).await);
             }
-            Json(er).into_response()
+            settled(Json(er), replicate)
         }
         Ok(None) => {
-            let e = xerj_common::XerjError::document_not_found(&id, &index);
-            ApiError::new(e).into_response()
+            let e = xerj_common::XerjError::document_not_found(id, index);
+            settled(ApiError::new(e), false)
         }
-        Err(e) => ApiError::new(xerj_common::XerjError::from(e)).into_response(),
+        Err(e) => settled(ApiError::new(xerj_common::XerjError::from(e)), false),
     }
 }
 
@@ -23855,6 +24538,10 @@ pub async fn head_doc(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let idx = match state.engine.get_index(&index) {
         Ok(i) => i,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -31220,7 +31907,10 @@ async fn resolve_by_query_targets(
     state: &AppState,
     spec: &str,
     user_query: Value,
-) -> std::result::Result<(Vec<std::sync::Arc<xerj_engine::Index>>, Value), xerj_common::XerjError> {
+) -> std::result::Result<
+    (Vec<std::sync::Arc<xerj_engine::Index>>, Vec<String>, Value),
+    xerj_common::XerjError,
+> {
     let member_names = resolve_index_selector(state, spec).await;
 
     // Alias filters are keyed on the name AS WRITTEN (the alias, not its
@@ -31252,7 +31942,7 @@ async fn resolve_by_query_targets(
                 .map_err(xerj_common::XerjError::from)?,
         );
     }
-    Ok((indices, effective_query))
+    Ok((indices, member_names, effective_query))
 }
 
 /// Combine the per-member results of a fanned-out by-query into one response.
@@ -31263,7 +31953,7 @@ async fn resolve_by_query_targets(
 /// concatenated; if any member produced an error body (it carries a `status`),
 /// that error is surfaced rather than a clean aggregate — a destructive
 /// by-query that partially failed must not report success.
-fn aggregate_by_query_results(mut results: Vec<Value>, count_key: &str) -> Value {
+pub(crate) fn aggregate_by_query_results(mut results: Vec<Value>, count_key: &str) -> Value {
     if results.len() == 1 {
         return results.pop().unwrap();
     }
@@ -31315,6 +32005,80 @@ fn aggregate_by_query_results(mut results: Vec<Value>, count_key: &str) -> Value
     Value::Object(out)
 }
 
+/// Build the cluster fan-out off this handler's state machine.
+///
+/// `delete_by_query` is already large enough that a debug build's worker
+/// stack (2 MiB, the `#[tokio::test]` default) overflows once a second copy
+/// of the runner is inlined into the same future. `[cluster] enabled = false`
+/// never polls the fan-out, so the future is allocated here and only the
+/// pointer is stored on the handler. `inline(never)` keeps that allocation
+/// in this frame: inlining it back into `delete_by_query` puts the fan-out
+/// on the worker stack again.
+#[inline(never)]
+fn begin_cluster_delete_by_query(
+    state: AppState,
+    index_names: Vec<String>,
+    parts: crate::cluster_shard::DeleteByQueryParts,
+    wait_for_completion: bool,
+    handle: crate::state::TaskHandle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    Box::pin(cluster_delete_by_query(
+        state,
+        index_names,
+        parts,
+        wait_for_completion,
+        handle,
+    ))
+}
+
+async fn cluster_delete_by_query(
+    state: AppState,
+    index_names: Vec<String>,
+    parts: crate::cluster_shard::DeleteByQueryParts,
+    wait_for_completion: bool,
+    handle: crate::state::TaskHandle,
+) -> Response {
+    if !wait_for_completion {
+        let task_key = handle.key().to_string();
+        let spawned_key = task_key.clone();
+        let tasks = state.tasks.clone();
+        let names = index_names.clone();
+        // The fan-out calls `Engine::get_index` on the detached task, so
+        // the request's visibility rule has to come with it. See
+        // `xerj_engine::index_guard`.
+        let rule = xerj_engine::index_guard::current();
+        tokio::spawn(xerj_engine::index_guard::scoped_opt(rule, async move {
+            let mut results = Vec::with_capacity(names.len());
+            for name in &names {
+                results.push(
+                    crate::cluster_shard::pin_delete_by_query_on_primaries(
+                        state.clone(),
+                        name.clone(),
+                        parts.clone(),
+                    )
+                    .await,
+                );
+            }
+            tasks.complete(&spawned_key, aggregate_by_query_results(results, "deleted"));
+            drop(handle);
+        }));
+        return Json(json!({ "task": task_key })).into_response();
+    }
+    let mut results = Vec::with_capacity(index_names.len());
+    for name in &index_names {
+        results.push(
+            crate::cluster_shard::pin_delete_by_query_on_primaries(
+                state.clone(),
+                name.clone(),
+                parts.clone(),
+            )
+            .await,
+        );
+    }
+    drop(handle);
+    by_query_response(aggregate_by_query_results(results, "deleted"))
+}
+
 pub async fn delete_by_query(
     State(state): State<AppState>,
     Path(index): Path<String>,
@@ -31323,7 +32087,7 @@ pub async fn delete_by_query(
 ) -> impl IntoResponse {
     // Fan the selector out to every member of a multi-index alias (#450), with
     // any alias filter already ANDed into the query.
-    let (indices, effective_query) =
+    let (indices, index_names, effective_query) =
         match resolve_by_query_targets(&state, &index, body.query.clone()).await {
             Ok(t) => t,
             Err(e) => return ApiError::new(e).into_response(),
@@ -31354,6 +32118,22 @@ pub async fn delete_by_query(
         .unwrap_or(true);
     let handle = state.tasks.register("indices:data/write/delete/byquery");
 
+    if state.engine.has_cluster() {
+        let parts = crate::cluster_shard::DeleteByQueryParts {
+            query: effective_query,
+            max_docs: body.max_docs,
+            scroll_size,
+        };
+        return begin_cluster_delete_by_query(
+            state,
+            index_names,
+            parts,
+            wait_for_completion,
+            handle,
+        )
+        .await;
+    }
+
     if !wait_for_completion {
         let task_key = handle.key().to_string();
         let spawned_key = task_key.clone();
@@ -31367,9 +32147,11 @@ pub async fn delete_by_query(
         // `Engine::get_index` has to follow instead.
         tokio::spawn(async move {
             let mut results = Vec::with_capacity(indices.len());
-            for idx in &indices {
-                results
-                    .push(run_delete_by_query(idx, &task_query, task_max_docs, scroll_size).await);
+            for idx in indices {
+                results.push(
+                    pin_local_delete_by_query(idx, task_query.clone(), task_max_docs, scroll_size)
+                        .await,
+                );
             }
             tasks.complete(&spawned_key, aggregate_by_query_results(results, "deleted"));
             drop(handle);
@@ -31378,8 +32160,11 @@ pub async fn delete_by_query(
     }
 
     let mut results = Vec::with_capacity(indices.len());
-    for idx in &indices {
-        results.push(run_delete_by_query(idx, &effective_query, body.max_docs, scroll_size).await);
+    for idx in indices {
+        results.push(
+            pin_local_delete_by_query(idx, effective_query.clone(), body.max_docs, scroll_size)
+                .await,
+        );
     }
     drop(handle);
     by_query_response(aggregate_by_query_results(results, "deleted"))
@@ -31485,11 +32270,70 @@ async fn by_query_matches_anything(
     Ok(results.total.value > 0)
 }
 
+fn record_deleted(deleted_ids: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, id: &str) {
+    let Some(ids) = deleted_ids else {
+        return;
+    };
+    ids.lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(id.to_string());
+}
+
 async fn run_delete_by_query(
     idx: &std::sync::Arc<xerj_engine::Index>,
     query: &Value,
     max_docs: Option<u64>,
     scroll_size: usize,
+) -> Value {
+    run_delete_by_query_recorded(idx, query, max_docs, scroll_size, None).await
+}
+
+/// Box the single-node runner so `delete_by_query`'s future stays a pointer.
+///
+/// The cluster branch and this branch share one state machine. Leaving the
+/// runner inline makes that machine as large as the runner, and allocating
+/// it on a 2 MiB debug worker overflows before the cluster branch can
+/// forward. `inline(never)` builds the runner in this frame, then the box
+/// is what the handler stores. `[cluster] enabled = false` still runs this
+/// runner and no other.
+#[inline(never)]
+fn pin_local_delete_by_query(
+    idx: std::sync::Arc<xerj_engine::Index>,
+    query: Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    Box::pin(async move { run_delete_by_query(&idx, &query, max_docs, scroll_size).await })
+}
+
+/// Own the runner's arguments, then box it.
+///
+/// A primary's `_delete_by_query` is reached from the fan-out. Inlining the
+/// runner into that future puts the search state machine on the caller's
+/// stack and overflows a debug worker. The box is the same split
+/// [`run_update_by_query_recorded_boxed`] uses.
+#[inline(never)]
+pub(crate) fn run_delete_by_query_recorded_boxed(
+    idx: std::sync::Arc<xerj_engine::Index>,
+    query: Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
+    deleted_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    Box::pin(async move {
+        run_delete_by_query_recorded(&idx, &query, max_docs, scroll_size, deleted_ids).await
+    })
+}
+
+/// Same run as `run_delete_by_query`. When `deleted_ids` is set, every id
+/// this run removed is appended, including ids removed before a later page
+/// refuses the rest. The cluster primary copies that list onto its replicas.
+pub(crate) async fn run_delete_by_query_recorded(
+    idx: &std::sync::Arc<xerj_engine::Index>,
+    query: &Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
+    deleted_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Value {
     let started = Instant::now();
 
@@ -31567,7 +32411,10 @@ async fn run_delete_by_query(
             for id in chunk {
                 processed += 1;
                 match idx.delete_document(id).await {
-                    Ok(_) => deleted += 1,
+                    Ok(_) => {
+                        deleted += 1;
+                        record_deleted(&deleted_ids, id);
+                    }
                     Err(e) => {
                         failures.push(json!({
                             "id": id,
@@ -31672,7 +32519,10 @@ async fn run_delete_by_query(
         for hit in results.hits {
             processed += 1;
             match idx.delete_document(&hit.id).await {
-                Ok(_) => deleted += 1,
+                Ok(_) => {
+                    deleted += 1;
+                    record_deleted(&deleted_ids, &hit.id);
+                }
                 Err(e) => {
                     failures.push(json!({
                         "id": hit.id,
@@ -31734,6 +32584,137 @@ pub struct UpdateByQueryBody {
     pub scroll_size: Option<u64>,
 }
 
+/// Why `pipeline` cannot run on this engine, in the same words the
+/// `_update_by_query?pipeline=` handler has always used.
+pub(crate) fn unrunnable_pipeline_reason(
+    engine: &xerj_engine::Engine,
+    pipeline: &str,
+) -> Option<String> {
+    if !engine.pipelines.contains_key(pipeline) {
+        Some(format!("pipeline with id [{pipeline}] does not exist"))
+    } else {
+        engine.unrunnable_pipelines.get(pipeline).map(|reason| {
+            format!(
+                "pipeline with id [{pipeline}] cannot be run: {}",
+                reason.value()
+            )
+        })
+    }
+}
+
+pub(crate) fn pipeline_rejected_body(reason: &str) -> Value {
+    json!({
+        "error": {
+            "root_cause": [{ "type": "illegal_argument_exception", "reason": reason }],
+            "type": "illegal_argument_exception",
+            "reason": reason,
+        },
+        "status": 400,
+    })
+}
+
+/// Build the cluster fan-out off this handler's state machine.
+///
+/// `update_by_query` is already large enough that a debug build's worker
+/// stack (2 MiB, the `#[tokio::test]` default) overflows once a second copy
+/// of the runner is inlined into the same future. `[cluster] enabled = false`
+/// never polls the fan-out, so the future is allocated here and only the
+/// pointer is stored on the handler. The server runtime is 4 MiB; this keeps
+/// the single-node path the size it was before the fan-out existed.
+fn begin_cluster_update_by_query(
+    state: AppState,
+    index_names: Vec<String>,
+    parts: crate::cluster_shard::UpdateByQueryParts,
+    wait_for_completion: bool,
+    handle: crate::state::TaskHandle,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Response> + Send>> {
+    Box::pin(cluster_update_by_query(
+        state,
+        index_names,
+        parts,
+        wait_for_completion,
+        handle,
+    ))
+}
+
+async fn cluster_update_by_query(
+    state: AppState,
+    index_names: Vec<String>,
+    parts: crate::cluster_shard::UpdateByQueryParts,
+    wait_for_completion: bool,
+    handle: crate::state::TaskHandle,
+) -> Response {
+    if !wait_for_completion {
+        let task_key = handle.key().to_string();
+        let spawned_key = task_key.clone();
+        let tasks = state.tasks.clone();
+        let names = index_names.clone();
+        // The fan-out calls `Engine::get_index` on the detached task, so
+        // the request's visibility rule has to come with it. See
+        // `xerj_engine::index_guard`.
+        let rule = xerj_engine::index_guard::current();
+        tokio::spawn(xerj_engine::index_guard::scoped_opt(rule, async move {
+            let mut results = Vec::with_capacity(names.len());
+            for name in &names {
+                results.push(
+                    crate::cluster_shard::pin_update_by_query_on_primaries(
+                        state.clone(),
+                        name.clone(),
+                        parts.clone(),
+                    )
+                    .await,
+                );
+            }
+            tasks.complete(&spawned_key, aggregate_by_query_results(results, "updated"));
+            drop(handle);
+        }));
+        return Json(json!({ "task": task_key })).into_response();
+    }
+    let mut results = Vec::with_capacity(index_names.len());
+    for name in &index_names {
+        results.push(
+            crate::cluster_shard::pin_update_by_query_on_primaries(
+                state.clone(),
+                name.clone(),
+                parts.clone(),
+            )
+            .await,
+        );
+    }
+    drop(handle);
+    by_query_response(aggregate_by_query_results(results, "updated"))
+}
+
+/// Own the runner's arguments, then box it.
+///
+/// A primary's `_update_by_query` runs on the coordinator's task when this
+/// node is that primary. Inlining the runner into the fan-out future puts
+/// two copies of it on the stack under `search_inner` and overflows a debug
+/// worker. The box is the same split `MemoryShardRpc` uses for a remote
+/// primary: the heavy future is not built on the caller's state machine.
+pub(crate) fn run_update_by_query_recorded_boxed(
+    idx: std::sync::Arc<xerj_engine::Index>,
+    query: Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
+    script: Option<(String, Value)>,
+    pipeline: Option<(std::sync::Arc<xerj_engine::Engine>, String)>,
+    updated_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Value> + Send>> {
+    Box::pin(async move {
+        run_update_by_query_recorded(
+            &idx,
+            &query,
+            max_docs,
+            scroll_size,
+            script,
+            pipeline,
+            updated_ids,
+        )
+        .await
+    })
+}
+
 pub async fn update_by_query(
     State(state): State<AppState>,
     Path(index): Path<String>,
@@ -31743,11 +32724,11 @@ pub async fn update_by_query(
     let query_val = body.query.clone().unwrap_or(json!({ "match_all": {} }));
     // Fan the selector out to every member of a multi-index alias (#450), with
     // any alias filter already ANDed into the query.
-    let (indices, effective_query) = match resolve_by_query_targets(&state, &index, query_val).await
-    {
-        Ok(t) => t,
-        Err(e) => return ApiError::new(e).into_response(),
-    };
+    let (indices, index_names, effective_query) =
+        match resolve_by_query_targets(&state, &index, query_val).await {
+            Ok(t) => t,
+            Err(e) => return ApiError::new(e).into_response(),
+        };
 
     // Validate the (alias-filter-ANDed) query once, up front, so a malformed
     // body is an immediate 400 before a task is registered or any member is
@@ -31778,34 +32759,27 @@ pub async fn update_by_query(
     // rewritten every document EXACTLY as it was. Resolved and validated
     // before any document is touched: an unknown or unrunnable name fails the
     // whole request rather than half of it.
-    let pipeline = match params.get("pipeline").map(String::as_str) {
+    //
+    // With a cluster handle the pipeline runs on each primary, which is where
+    // the current source is. The check is that primary's, before it writes.
+    // Single-node mode still refuses here, on the node that accepted the call.
+    let pipeline_name = match params.get("pipeline").map(String::as_str) {
         None | Some("_none") => None,
-        Some(p) => {
-            let reason = if !state.engine.pipelines.contains_key(p) {
-                Some(format!("pipeline with id [{p}] does not exist"))
-            } else {
-                state
-                    .engine
-                    .unrunnable_pipelines
-                    .get(p)
-                    .map(|r| format!("pipeline with id [{p}] cannot be run: {}", r.value()))
-            };
-            if let Some(reason) = reason {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json!({
-                        "error": {
-                            "root_cause": [{ "type": "illegal_argument_exception", "reason": reason }],
-                            "type": "illegal_argument_exception",
-                            "reason": reason,
-                        },
-                        "status": 400,
-                    })),
-                )
-                    .into_response();
-            }
-            Some((state.engine.clone(), p.to_string()))
+        Some(p) => Some(p.to_string()),
+    };
+    let pipeline = if state.engine.has_cluster() {
+        None
+    } else if let Some(p) = pipeline_name.as_deref() {
+        if let Some(reason) = unrunnable_pipeline_reason(&state.engine, p) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(pipeline_rejected_body(&reason)),
+            )
+                .into_response();
         }
+        Some((state.engine.clone(), p.to_string()))
+    } else {
+        None
     };
 
     // ES defaults `wait_for_completion` to true (synchronous); only an
@@ -31815,6 +32789,24 @@ pub async fn update_by_query(
         .map(|v| v != "false")
         .unwrap_or(true);
     let handle = state.tasks.register("indices:data/write/update/byquery");
+
+    if state.engine.has_cluster() {
+        let parts = crate::cluster_shard::UpdateByQueryParts {
+            query: effective_query,
+            script,
+            pipeline: pipeline_name,
+            max_docs: body.max_docs,
+            scroll_size,
+        };
+        return begin_cluster_update_by_query(
+            state,
+            index_names,
+            parts,
+            wait_for_completion,
+            handle,
+        )
+        .await;
+    }
 
     if !wait_for_completion {
         let task_key = handle.key().to_string();
@@ -31944,6 +32936,15 @@ fn apply_pipeline_or_fail(
 /// no-script write is blind — XERJ cannot produce a version conflict);
 /// `noops` stays 0 (the mini-painless tolerates `ctx.*` statements without
 /// skipping the write).
+fn record_updated(updated_ids: &Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, id: &str) {
+    let Some(ids) = updated_ids else {
+        return;
+    };
+    ids.lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .push(id.to_string());
+}
+
 async fn run_update_by_query(
     idx: &std::sync::Arc<xerj_engine::Index>,
     query: &Value,
@@ -31951,6 +32952,18 @@ async fn run_update_by_query(
     scroll_size: usize,
     script: Option<(String, Value)>,
     pipeline: Option<(std::sync::Arc<xerj_engine::Engine>, String)>,
+) -> Value {
+    run_update_by_query_recorded(idx, query, max_docs, scroll_size, script, pipeline, None).await
+}
+
+pub(crate) async fn run_update_by_query_recorded(
+    idx: &std::sync::Arc<xerj_engine::Index>,
+    query: &Value,
+    max_docs: Option<u64>,
+    scroll_size: usize,
+    script: Option<(String, Value)>,
+    pipeline: Option<(std::sync::Arc<xerj_engine::Engine>, String)>,
+    updated_ids: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
 ) -> Value {
     let started = Instant::now();
 
@@ -32061,7 +33074,10 @@ async fn run_update_by_query(
                                 processed += 1;
                                 if let Some(f) = transform_one(idx, id, &script, &pipeline).await {
                                     match f {
-                                        Ok(()) => updated += 1,
+                                        Ok(()) => {
+                                            updated += 1;
+                                            record_updated(&updated_ids, id);
+                                        }
                                         Err(reason) => failures.push(json!({
                                             "id": id,
                                             "cause": { "reason": reason },
@@ -32193,6 +33209,7 @@ async fn run_update_by_query(
                                     Ok(()) => {
                                         updated += 1;
                                         mutated_in_batch += 1;
+                                        record_updated(&updated_ids, &hit.id);
                                     }
                                     Err(reason) => failures.push(json!({
                                         "id": hit.id,
@@ -32227,6 +33244,7 @@ async fn run_update_by_query(
                                 Ok(_) => {
                                     updated += 1;
                                     mutated_in_batch += 1;
+                                    record_updated(&updated_ids, &hit.id);
                                 }
                                 Err(e) => {
                                     failures.push(json!({
@@ -32383,13 +33401,10 @@ mod scripted_update_publication_tests {
                     State(state),
                     Path(("script-counter".to_string(), "counter".to_string())),
                     Query(UpdateDocParams::default()),
-                    Json(EsUpdateBody {
-                        doc: None,
-                        doc_as_upsert: false,
-                        upsert: None,
-                        script: Some(json!("ctx._source.n += 1")),
-                        detect_noop: None,
-                    }),
+                    bytes::Bytes::from(
+                        serde_json::to_vec(&json!({"script": "ctx._source.n += 1"}))
+                            .expect("script update body"),
+                    ),
                 )
                 .await
                 .into_response()
@@ -38632,7 +39647,11 @@ fn spawn_watch_evaluator(
                 if !alive {
                     break;
                 }
-                cursor = evaluate_watch_pass(&state, &id, &watch, cursor).await;
+                // The pass owns a search state machine. Polling it inline on
+                // this task shares the caller's stack with the `#[tokio::test]`
+                // runtime (2 MiB). The box keeps that machine off the stack;
+                // the cursor and the retry rules are unchanged.
+                cursor = Box::pin(evaluate_watch_pass(&state, &id, &watch, cursor)).await;
             }
         },
     ));

@@ -19,8 +19,11 @@ pub mod mbox;
 pub(crate) mod opc;
 pub mod pdf;
 pub mod pptx;
+#[cfg(unix)]
+pub(crate) mod rlimit;
 pub mod sqldump;
 pub mod sqlite_x;
+pub mod sqlsrc;
 pub mod txt;
 pub mod unity;
 pub mod xls;
@@ -196,6 +199,12 @@ pub fn extract_as_document_with_name(
     if skip_phrase_index(logical_path, content_path, gzip) {
         return emit_phrase_skip(logical_path, sink);
     }
+    // A folded HTML page is rendered as the page, not as its markup: the
+    // same title/headings/body an HTML document gets, with its table rows in
+    // the body. Raw text would index tags and scripts.
+    if is_html_name(logical_path) {
+        return html::extract_document(content_path, logical_path, gzip, sink);
+    }
     let mut stats = ExtractStats::default();
     let Some(bytes) = read_whole(content_path, gzip, MAX_WHOLE_FILE)? else {
         stats.junk += 1;
@@ -220,6 +229,17 @@ pub fn extract_as_document_with_name(
         &mut stats,
     );
     Ok(stats)
+}
+
+/// `.html`/`.htm`/`.xhtml`, optionally gzipped, by the logical name.
+fn is_html_name(logical: &Path) -> bool {
+    let name = logical
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let name = name.strip_suffix(".gz").unwrap_or(&name);
+    name.ends_with(".html") || name.ends_with(".htm") || name.ends_with(".xhtml")
 }
 
 /// Bytes of a JS/CSS prefix read to decide "this is a bundle, not source".
@@ -366,7 +386,31 @@ pub fn extract(
             sink,
         ),
         Family::Sqlite => sqlite_x::extract(path, limit_bytes.map(|_| 500), sink),
-        Family::SqlDump => sqldump::extract(path, sn.gzip, limit_bytes, sink),
+        Family::SqlDump => {
+            let stats = sqldump::extract(path, sn.gzip, limit_bytes, sink)?;
+            // #2337: COPY dumps and other row formats this parser does not
+            // read yield zero records, and `scan_file` then junks the whole
+            // file — schema included. A `.sql` file in that state is source
+            // when it has DDL, and an explicit skip when it is only row data.
+            if stats.records == 0
+                && stats.refusal.is_none()
+                && crate::sniff::is_sql_filename(sn.logical_name.as_deref().unwrap_or(path))
+            {
+                let alt = sqlsrc::extract(
+                    path,
+                    sn.logical_name.as_deref().unwrap_or(path),
+                    sn.gzip,
+                    sink,
+                )?;
+                if alt.records > 0 {
+                    return Ok(alt);
+                }
+                let mut stats = stats;
+                stats.refusal = Some(sqlsrc::DATA_ONLY_DUMP_REASON.to_string());
+                return Ok(stats);
+            }
+            Ok(stats)
+        }
         Family::Code => code::extract(path, sn, sink),
         Family::UnityYaml => unity::extract_unity(path, sn.gzip, limit_bytes, sink),
         Family::UnityMeta => unity::extract_meta(path, sn.gzip, sink),
@@ -450,6 +494,13 @@ fn flatten_into(key: &str, v: Value, depth: usize, out: &mut Map<String, Value>)
         Value::Array(a) => {
             if a.iter().all(|e| !e.is_object() && !e.is_array()) {
                 out.insert(key.to_string(), Value::Array(a));
+            } else if is_numeric_series(&a) {
+                // #2422/#2423: a flight trace, coordinate ring or sample
+                // matrix. As a JSON string it became a ~72 KB `text` field per
+                // record: thousands of number tokens no query wants, and a
+                // stored column every search hit had to decode. Keep its
+                // size, which is searchable and sortable.
+                out.insert(format!("{key}_count"), Value::from(a.len() as u64));
             } else {
                 out.insert(key.to_string(), Value::String(bounded_json(&a)));
             }
@@ -458,6 +509,53 @@ fn flatten_into(key: &str, v: Value, depth: usize, out: &mut Map<String, Value>)
             out.insert(key.to_string(), other);
         }
     }
+}
+
+/// A nested array with at least this many scalar leaves can be a numeric
+/// series; below it, it is a small structure that still reads as JSON text.
+pub const NUMERIC_SERIES_MIN_LEAVES: usize = 256;
+
+/// Is this nested array (one holding arrays or objects) a numeric series: at
+/// least [`NUMERIC_SERIES_MIN_LEAVES`] scalar leaves, and numbers are most of
+/// its non-null ones? The walk stops after a bounded number of leaves, so a
+/// multi-megabyte trace costs the same as a small one.
+fn is_numeric_series(a: &[Value]) -> bool {
+    const SCAN_LEAVES: usize = 8192;
+    fn walk(v: &Value, leaves: &mut usize, numbers: &mut usize, non_null: &mut usize) {
+        if *leaves >= SCAN_LEAVES {
+            return;
+        }
+        match v {
+            Value::Array(items) => {
+                for item in items {
+                    walk(item, leaves, numbers, non_null);
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values() {
+                    walk(item, leaves, numbers, non_null);
+                }
+            }
+            Value::Null => *leaves += 1,
+            Value::Number(_) => {
+                *leaves += 1;
+                *non_null += 1;
+                *numbers += 1;
+            }
+            Value::String(_) | Value::Bool(_) => {
+                *leaves += 1;
+                *non_null += 1;
+            }
+        }
+    }
+    let (mut leaves, mut numbers, mut non_null) = (0usize, 0usize, 0usize);
+    for item in a {
+        walk(item, &mut leaves, &mut numbers, &mut non_null);
+        if leaves >= SCAN_LEAVES {
+            break;
+        }
+    }
+    leaves >= NUMERIC_SERIES_MIN_LEAVES && non_null > 0 && numbers * 2 > non_null
 }
 
 /// JSON for a nested value that will be stored as one string field.
@@ -913,6 +1011,10 @@ fn section_record(
     // means something pass a base; DOCX/HTML sections carry none.
     if let Some(line) = start_line {
         fields.insert("start_line".into(), Value::Number(line.into()));
+        // #2351: a `_source` include of start_line/end_line needs both.
+        // The span is the lines this section actually stored.
+        let span = section.lines().count().max(1) as u64;
+        fields.insert("end_line".into(), Value::Number((line + span - 1).into()));
     }
     fields.insert("body".into(), Value::String(section));
     RawRecord {
@@ -1109,6 +1211,65 @@ pub(crate) fn wait_until_slot<'a, T>(
 #[cfg(test)]
 mod section_tests {
     use super::*;
+
+    /// #2422/#2423: an ADS-B style trace — rows of numbers with a few
+    /// strings, nulls and an occasional object — is not a text field.
+    #[test]
+    fn nested_numeric_series_is_kept_as_a_count_not_json_text() {
+        let rows: Vec<Value> = (0..200)
+            .map(|i| {
+                serde_json::json!([
+                    i as f64 * 5.1,
+                    33.93 + i as f64 * 1e-4,
+                    -118.39,
+                    "ground",
+                    0.0,
+                    84.4,
+                    1,
+                    null,
+                    if i == 0 {
+                        serde_json::json!({"flight": "N3CEGE", "nic": 8})
+                    } else {
+                        Value::Null
+                    },
+                    "adsb_icao",
+                    null
+                ])
+            })
+            .collect();
+        let mut obj = Map::new();
+        obj.insert("icao".into(), Value::from("04200a"));
+        obj.insert("trace".into(), Value::Array(rows));
+        let flat = flatten_object(obj);
+        assert!(
+            !flat.contains_key("trace"),
+            "trace must not become a JSON string field"
+        );
+        assert_eq!(flat.get("trace_count"), Some(&Value::from(200u64)));
+        assert_eq!(flat.get("icao"), Some(&Value::from("04200a")));
+    }
+
+    /// A small nested array, and a large one made of words, still round-trip
+    /// as the JSON string they always were.
+    #[test]
+    fn small_or_textual_nested_arrays_stay_json_text() {
+        let mut obj = Map::new();
+        obj.insert("ring".into(), serde_json::json!([[1.0, 2.0], [3.0, 4.0]]));
+        let words: Vec<Value> = (0..300)
+            .map(|i| serde_json::json!([format!("alpha{i}"), format!("beta{i}")]))
+            .collect();
+        obj.insert("pairs".into(), Value::Array(words));
+        let flat = flatten_object(obj);
+        assert_eq!(
+            flat.get("ring"),
+            Some(&Value::from("[[1.0,2.0],[3.0,4.0]]"))
+        );
+        assert!(flat
+            .get("pairs")
+            .and_then(Value::as_str)
+            .is_some_and(|s| s.starts_with("[[\"alpha0\"")));
+        assert!(!flat.contains_key("ring_count") && !flat.contains_key("pairs_count"));
+    }
 
     fn doc(paras: usize, para_chars: usize) -> String {
         (0..paras)
@@ -1614,6 +1775,26 @@ mod section_tests {
         ));
         assert!(got.len() > 1, "the fixture must split");
         assert_eq!(got[0].0, 10, "the first section starts at base_line");
+        // The sink above kept only start_line. Re-read end_line from a
+        // one-section document: it is the last stored line, not a copy of
+        // the start when the body spans more than one line.
+        let mut one = Vec::new();
+        let mut one_stats = ExtractStats::default();
+        assert!(emit_document(
+            "t",
+            &[],
+            "alpha\nbeta\n",
+            Some(4),
+            MAX_RECORDS_PER_FILE,
+            &mut |r| {
+                one.push(r);
+                true
+            },
+            &mut one_stats
+        ));
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].fields["start_line"], Value::Number(4.into()));
+        assert_eq!(one[0].fields["end_line"], Value::Number(5.into()));
         let lines: Vec<&str> = body.lines().collect();
         for (line, section) in &got {
             let first = section.lines().next().unwrap_or("");

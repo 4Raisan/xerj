@@ -9,10 +9,10 @@
 //!
 //! It speaks the MCP **stdio transport**: newline-delimited
 //! JSON-RPC 2.0 messages on stdin/stdout. It exposes XERJ to any MCP-capable
-//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twenty-one
-//! tools: eighteen without a hub key, and three Corpus Hub tools
+//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twenty-two
+//! tools: nineteen without a hub key, and three Corpus Hub tools
 //! (`xerj_hub_*`) that run the `xerj ask` flow itself. Thirteen of those
-//! eighteen construct exactly the request the running engine already accepts
+//! nineteen construct exactly the request the running engine already accepts
 //! and forward it to a configurable base URL. `xerj_index_budget` counts a
 //! folder and returns the budget plans; it does not index. `xerj_autoindex_remove`
 //! deletes one autoindexed folder after listing what that folder owns, and only
@@ -29,6 +29,7 @@
 //! |------------------------|---------------------------------------|-----------------|
 //! | `xerj_def` | `GET /{index}/_mapping` + `POST /{index}/_search` | local definition lookup with CLI ranking and deduplication |
 //! | `xerj_search`          | `POST /{index}/_search`               | ES query-DSL search (full-text / keyword / structured) |
+//! | `xerj_batch_search` | `GET /{index}/_mapping` + `POST /_msearch` | ordered per-item evidence, abstention or error; shared with `xerj batch-search` |
 //! | `xerj_semantic_search` | `POST /{index}/_search` (`semantic`)  | server-side lexical embedding, no external key |
 //! | `xerj_vector_search`   | `POST /{index}/_search` (`knn`)       | kNN over a `dense_vector` field (HNSW-served unfiltered, exact filtered) |
 //! | `xerj_hybrid_search`   | `POST /{index}/_search` (`hybrid`)    | RRF or linear fusion of sub-queries |
@@ -100,10 +101,14 @@
 //! words), with duplicate passages removed before budgeting and
 //! over-budget hits reduced to locators.
 
+mod batch;
+mod batch_cli;
 mod def;
 mod hub;
 mod map;
 mod token_budget;
+
+pub use batch_cli::run_batch_cli;
 
 use std::time::Duration;
 
@@ -120,6 +125,8 @@ const DEFAULT_PROTOCOL_VERSION: &str = "2025-06-18";
 const DEFAULT_SEARCH_SIZE: usize = 10;
 /// Default XERJ ES-compatible endpoint.
 const DEFAULT_XERJ_URL: &str = "http://localhost:9200";
+/// Deadline for one proxied request to the node, connect to last body byte.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How to start the node `xerj mcp` proxies to. The flags are the local-dev
 /// start in llms.txt ("Start here", step 1), the README, and the `xerj mcp`
@@ -363,8 +370,8 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
     let (auth, auth_key_file) =
         resolve_auth(auth_override, std::env::var("XERJ_AUTH").ok(), &base_url);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
+    let client = node_http_builder(&base_url)
+        .timeout(REQUEST_TIMEOUT)
         .build()?;
 
     let ctx = Ctx {
@@ -391,10 +398,41 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
     }
 
     // stdout is the JSON-RPC channel; stderr is for logs only.
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut stdout = tokio::io::stdout();
+    serve(ctx, BufReader::new(tokio::io::stdin()), tokio::io::stdout()).await
+}
+
+/// The JSON-RPC loop over newline-delimited messages, apart from the process'
+/// stdin/stdout so tests can drive it over an in-memory pipe.
+///
+/// A `tools/call` request runs on its own task, so a call that waits on the
+/// node does not hold up the messages behind it (#2390): `ping`,
+/// `initialize`, `tools/list` and notifications stay inline because they never
+/// wait on anything. Replies are matched by `id`, so they may go out in any
+/// order. `notifications/cancelled` aborts the call it names, and no response
+/// is written for it. Every reply goes through one writer task, so lines never
+/// interleave. At end of input the loop waits for the calls still running and
+/// writes their replies before returning, as the serial loop did.
+async fn serve<R, W>(ctx: Ctx, reader: R, stdout: W) -> anyhow::Result<()>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let ctx = std::sync::Arc::new(ctx);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let writer = tokio::spawn(async move {
+        let mut stdout = stdout;
+        while let Some(msg) = rx.recv().await {
+            write_msg(&mut stdout, &msg).await?;
+        }
+        anyhow::Ok(())
+    });
+    let in_flight = InFlight::default();
+    let mut calls = tokio::task::JoinSet::new();
+    let mut lines = reader.lines();
 
     while let Some(line) = lines.next_line().await? {
+        // Reap finished calls so a long session does not accumulate them.
+        while calls.try_join_next().is_some() {}
         let line = line.trim();
         if line.is_empty() {
             continue;
@@ -404,14 +442,19 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
             Ok(v) => v,
             Err(e) => {
                 // Parse error: reply per JSON-RPC (id unknown → null).
-                let resp = rpc_error(Value::Null, -32700, format!("parse error: {e}"));
-                write_msg(&mut stdout, &resp).await?;
+                if tx
+                    .send(rpc_error(Value::Null, -32700, format!("parse error: {e}")))
+                    .is_err()
+                {
+                    break;
+                }
                 continue;
             }
         };
 
         // JSON-RPC allows a batch (array) of messages. MCP 2024-11-05 uses it;
         // 2025-06-18 dropped it. Support both: object → single, array → batch.
+        // A batch keeps the serial handling it always had, one reply per line.
         let responses: Vec<Value> = match parsed {
             Value::Array(batch) => {
                 let mut out = Vec::new();
@@ -422,20 +465,119 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
                 }
                 out
             }
+            msg if is_cancellation(&msg) => {
+                if let Some(id) = msg.pointer("/params/requestId") {
+                    in_flight.cancel(id);
+                }
+                Vec::new()
+            }
+            msg if is_tool_call_request(&msg) => {
+                let key = id_key(&msg["id"]);
+                let (ctx, tx, registry) = (ctx.clone(), tx.clone(), in_flight.clone());
+                in_flight.start(&mut calls, key, move |token| async move {
+                    let reply = handle_message(&ctx, msg).await;
+                    // A cancellation that got here first means: say nothing.
+                    if registry.finish(token) {
+                        if let Some(reply) = reply {
+                            let _ = tx.send(reply);
+                        }
+                    }
+                });
+                Vec::new()
+            }
             other => handle_message(&ctx, other).await.into_iter().collect(),
         };
 
-        for resp in responses {
-            write_msg(&mut stdout, &resp).await?;
+        if responses.into_iter().any(|resp| tx.send(resp).is_err()) {
+            break; // the writer stopped: its error is returned below
         }
     }
 
-    Ok(())
+    while calls.join_next().await.is_some() {}
+    drop(tx);
+    writer.await?
+}
+
+fn is_tool_call_request(msg: &Value) -> bool {
+    msg.get("method").and_then(Value::as_str) == Some("tools/call")
+        && msg.get("id").is_some_and(|id| !id.is_null())
+}
+
+fn is_cancellation(msg: &Value) -> bool {
+    msg.get("method").and_then(Value::as_str) == Some("notifications/cancelled")
+}
+
+/// A request id as a map key. JSON-RPC ids are strings or numbers and `2` is
+/// not `"2"`, so the key is the id's JSON text.
+fn id_key(id: &Value) -> String {
+    id.to_string()
+}
+
+/// The `tools/call` requests still running, by request id, so a
+/// `notifications/cancelled` can abort the right one.
+#[derive(Clone, Default)]
+struct InFlight(std::sync::Arc<std::sync::Mutex<InFlightCalls>>);
+
+#[derive(Default)]
+struct InFlightCalls {
+    next: u64,
+    by_id: std::collections::HashMap<String, (u64, tokio::task::AbortHandle)>,
+}
+
+/// Which call a task is, so a reused request id cannot finish or cancel
+/// another call.
+struct CallToken {
+    key: String,
+    seq: u64,
+}
+
+impl InFlight {
+    /// Spawn `call` and register it. The lock is held across the spawn, so the
+    /// call cannot finish (and look itself up) before it is registered.
+    fn start<F, Fut>(&self, calls: &mut tokio::task::JoinSet<()>, key: String, call: F)
+    where
+        F: FnOnce(CallToken) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        guard.next += 1;
+        let seq = guard.next;
+        let handle = calls.spawn(call(CallToken {
+            key: key.clone(),
+            seq,
+        }));
+        guard.by_id.insert(key, (seq, handle));
+    }
+
+    /// The call is done: `true` if it should reply, `false` if it was
+    /// cancelled in the meantime.
+    fn finish(&self, token: CallToken) -> bool {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.by_id.get(&token.key) {
+            Some((seq, _)) if *seq == token.seq => {
+                guard.by_id.remove(&token.key);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Abort the running call with this id, if any. An unknown or finished id
+    /// is ignored, as the MCP spec asks.
+    fn cancel(&self, id: &Value) {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, handle)) = guard.by_id.remove(&id_key(id)) {
+            handle.abort();
+        }
+    }
 }
 
 /// Serialize one JSON-RPC message and write it as a single newline-terminated
 /// line (the MCP stdio framing), then flush.
-async fn write_msg(stdout: &mut tokio::io::Stdout, msg: &Value) -> anyhow::Result<()> {
+async fn write_msg<W>(stdout: &mut W, msg: &Value) -> anyhow::Result<()>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut buf = serde_json::to_vec(msg)?;
     buf.push(b'\n');
     stdout.write_all(&buf).await?;
@@ -486,9 +628,14 @@ pub async fn handle_message_for_test(
     auth: Option<String>,
     msg: Value,
 ) -> Option<Value> {
+    let base_url = base_url.trim_end_matches('/').to_string();
+    let client = node_http_builder(&base_url)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("build HTTP client");
     let ctx = Ctx {
-        client: reqwest::Client::new(),
-        base_url: base_url.trim_end_matches('/').to_string(),
+        client,
+        base_url,
         auth,
     };
     handle_message(&ctx, msg).await
@@ -757,6 +904,7 @@ pub fn tool_specs() -> Value {
 pub fn tool_specs_with(include_hub: bool) -> Value {
     let mut specs = json!([
         def::spec(),
+        batch::spec(),
         {
             "name": "xerj_search",
             "description":
@@ -782,7 +930,13 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                  located or the passage start line is unknown. `start_line` remains \
                  the passage start. \
                  Pass `max_tokens` to cap the response at a token budget (never exceeded; \
-                 see that argument for the tokenizer and the locator-only rule).",
+                 see that argument for the tokenizer and the locator-only rule). \
+                 If this prefix was autoindexed from a folder on this machine and a file \
+                 there is newer than the last run, or an indexed file has been removed, \
+                 the response adds `_xerj.hints` code `index_stale` with the last index \
+                 time and a reindex command. Hits are returned with that hint. The check \
+                 stats at most 4096 entries, stops after 100ms, and skips hidden and \
+                 ignored paths.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1259,6 +1413,11 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                 "real codebases solve this problem? Returns the matching definition ",
                 "(not a byte window), the file:line to cite, and per-hit licence ",
                 "warnings — AGPL/SSPL/Elastic/BUSL/GPL/LGPL/MPL sources are approach-only. ",
+                "A corpus marked own (`xerj corpus add --own`, or `xerj corpus own <name>`) ",
+                "is the caller's own first-party code: an unidentified licence (UNKNOWN or ",
+                "NONE-FOUND) stays in the hit header and the do-not-copy banner is omitted ",
+                "for that unidentified licence only. A detected copyleft or source-available ",
+                "licence still warns. Hub pack licence classes are unchanged. ",
                 "Refuses indices older than 30 days (override with stale_ok). ",
                 "A no-match is NOT an error: it says the corpus is wrong for the task. ",
                 "A line `weak match: the corpus may not cover this` means the passages are nearest neighbours, not coverage — fall back to grep or another corpus. ",
@@ -1276,7 +1435,7 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                     "full": { "type": "integer", "description": "Max chars per passage (default 800; 0 = file head only)." },
                     "no_symbol": { "type": "boolean", "description": "Window selection instead of the matching definition." },
                     "stale_ok": { "type": "boolean", "description": "Override the 30-day staleness refusal." },
-                    "licence_policy": { "type": "string", "enum": ["warn", "strict"], "description": "strict strips passage text from restricted-licence hits, keeping locator + warning (default warn)." },
+                    "licence_policy": { "type": "string", "enum": ["warn", "strict"], "description": "strict strips passage text from restricted-licence hits, keeping locator + warning (default warn). An own corpus's unidentified licence is not stripped." },
                     "max_tokens": max_tokens_arg_schema()
                 },
                 "required": ["corpus", "query"]
@@ -1862,6 +2021,9 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
     let mut demote_page: Option<usize> = None;
     let result = match name {
         "xerj_def" => return def::run(ctx, &args).await,
+        // Keep the batch state machine off the shared dispatcher future's
+        // stack: single-item tools must not inherit its larger frame.
+        "xerj_batch_search" => return Box::pin(batch::run(ctx, &args)).await,
         "xerj_search" => {
             // Resolve before even the mapping GET: conflicting or malformed
             // scope arguments must never silently query a different corpus.
@@ -1951,7 +2113,7 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
     match result {
         Ok((method, path, body)) => {
             let match_query = search_match_query(name, &args);
-            engine_request(
+            let result = engine_request(
                 ctx,
                 method,
                 &path,
@@ -1960,7 +2122,15 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
                 demote_page,
                 match_query.as_deref(),
             )
-            .await
+            .await;
+            // After the search, so a failed call does not pay for the catalog
+            // read and the check cannot take a connection the search needs.
+            let hint = if result.get("isError") == Some(&Value::Bool(true)) {
+                None
+            } else {
+                search_staleness(ctx, name, &args).await
+            };
+            apply_staleness(result, hint)
         }
         Err(msg) => tool_text(msg, true),
     }
@@ -1994,7 +2164,7 @@ fn plain_search_demotes_test_paths(args: &Value, mapping: Option<&Value>) -> boo
 /// The penalty is [`xerj_autoindex::def::penalize_demoted_paths`] — the same
 /// `path_is_demoted` rules `xerj def` uses. A response that is not a search
 /// hit list is returned unchanged.
-fn apply_search_path_demotion(text: &str, page: usize) -> String {
+fn apply_search_path_demotion(text: &str, page: usize, query: &str) -> String {
     let Ok(mut resp) = serde_json::from_str::<Value>(text) else {
         return text.to_string();
     };
@@ -2003,6 +2173,7 @@ fn apply_search_path_demotion(text: &str, page: usize) -> String {
             return text.to_string();
         };
         xerj_autoindex::def::penalize_demoted_paths(hits);
+        xerj_common::xccode::render::demote_sparse_definition_hits(hits, query);
         hits.truncate(page);
     }
     serde_json::to_string(&resp).unwrap_or_else(|_| text.to_string())
@@ -2681,6 +2852,10 @@ fn build_brain_overview(args: &Value) -> Result<BuiltRequest, String> {
 struct McpXc {
     base_url: String,
     auth: Option<String>,
+    /// `Ctx.client`'s deadline does not reach this fresh client; without one a
+    /// node that accepts and never answers holds the tool call (and the stdio
+    /// loop behind it) forever.
+    timeout: Duration,
 }
 
 impl McpXc {
@@ -2690,11 +2865,16 @@ impl McpXc {
             .build()
             .map_err(|e| format!("runtime: {e}"))?;
         let url = format!("{}{}", self.base_url, path);
+        let base_url = self.base_url.clone();
         let auth = self.auth.clone();
+        let timeout = self.timeout;
         let method = method.to_string();
         let body = body.cloned();
         rt.block_on(async move {
-            let client = reqwest::Client::new();
+            let client = node_http_builder(&base_url)
+                .timeout(timeout)
+                .build()
+                .map_err(|e| format!("http client: {e}"))?;
             let m = reqwest::Method::from_bytes(method.as_bytes())
                 .map_err(|_| format!("not an HTTP method: {method}"))?;
             let mut req = client.request(m, &url);
@@ -2707,7 +2887,7 @@ impl McpXc {
             let resp = req
                 .send()
                 .await
-                .map_err(|e| format!("no response from {url}: {e}"))?;
+                .map_err(|e| mcp_xc_send_error(&base_url, &url, &e))?;
             // Surface the status WITH the body: the tri-state callers (404 =
             // zero, not error) classify it themselves.
             let status = resp.status().as_u16();
@@ -2716,7 +2896,8 @@ impl McpXc {
             match status {
                 200..=299 => Ok(v),
                 404 => Err("__404__".to_string()),
-                other => Err(format!("HTTP {other}: {v}")),
+                other => Err(proxy_status_failure(&base_url, &url, other, &v.to_string())
+                    .unwrap_or_else(|| format!("HTTP {other}: {v}"))),
             }
         })
     }
@@ -2875,6 +3056,7 @@ async fn run_autoindex_remove(ctx: &Ctx, args: &Value) -> Value {
             root,
             yes: confirm,
             prompt: false,
+            state_dir: None,
         })
     })
     .await;
@@ -2953,7 +3135,11 @@ async fn run_code_search(ctx: &Ctx, args: &Value) -> Value {
     let base_url = ctx.base_url.clone();
     let auth = ctx.auth.clone();
     let res = tokio::task::spawn_blocking(move || {
-        let http = McpXc { base_url, auth };
+        let http = McpXc {
+            base_url,
+            auth,
+            timeout: REQUEST_TIMEOUT,
+        };
         let root = code_root();
         xerj_common::xccode::run_code_query(&root, &http, &http.base_url, &p, "stale_ok:true")
     })
@@ -3024,17 +3210,110 @@ async fn fetch_mapping(ctx: &Ctx, index: &str) -> Option<Value> {
     resp.json::<Value>().await.ok()
 }
 
+/// HTTP client for the XERJ node at `base_url`.
+///
+/// A loopback node (`127.0.0.1`, `localhost`, `::1`, and `0.0.0.0` — the
+/// same hosts [`xerj_common::localauth::url_is_loopback`] already treats as
+/// this machine) is never reached through `HTTP_PROXY`, `HTTPS_PROXY`, or
+/// `ALL_PROXY`. reqwest honours those for `127.0.0.1` unless told not to,
+/// and a proxy that cannot connect to loopback answers HTTP 503 while the
+/// node is healthy (#2379). A non-loopback URL keeps the process proxy
+/// settings, including `NO_PROXY`.
+pub(crate) fn node_http_builder(base_url: &str) -> reqwest::ClientBuilder {
+    let builder = reqwest::Client::builder();
+    if xerj_common::localauth::url_is_loopback(base_url) {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
+/// Proxy reqwest will use for `base_url`, with userinfo removed.
+///
+/// `None` for loopback (the client is built with [`node_http_builder`], which
+/// disables proxies) and when `NO_PROXY` excludes the host. This is
+/// `hyper_util`'s env matcher, the one reqwest installs — scheme-specific
+/// `HTTP_PROXY` / `HTTPS_PROXY` win over `ALL_PROXY`.
+fn env_proxy_label(base_url: &str) -> Option<String> {
+    if xerj_common::localauth::url_is_loopback(base_url) {
+        return None;
+    }
+    let uri = base_url.parse::<http::Uri>().ok()?;
+    let intercept = hyper_util::client::proxy::matcher::Matcher::from_env().intercept(&uri)?;
+    Some(redact_proxy(intercept.uri()))
+}
+
+/// `http://proxy:8080`, never `http://user:secret@proxy:8080`.
+fn redact_proxy(uri: &http::Uri) -> String {
+    let scheme = uri.scheme_str().unwrap_or("http");
+    let Some(authority) = uri.authority() else {
+        return uri.to_string();
+    };
+    let host_port = authority
+        .as_str()
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority.as_str());
+    format!("{scheme}://{host_port}")
+}
+
+/// `Some` when this status arrived through an env proxy and is one a proxy
+/// generates when it cannot reach the upstream (502, 503, 504). The text
+/// names the proxy. A 401 or 400 stays the node's own sentence.
+pub(crate) fn proxy_status_failure(
+    base_url: &str,
+    request_url: &str,
+    status: u16,
+    body: &str,
+) -> Option<String> {
+    if !matches!(status, 502..=504) {
+        return None;
+    }
+    let proxy = env_proxy_label(base_url)?;
+    Some(proxy_gateway_message(request_url, &proxy, status, body))
+}
+
+fn proxy_gateway_message(request_url: &str, proxy: &str, status: u16, body: &str) -> String {
+    format!(
+        "request to {request_url} went through proxy {proxy}, which returned HTTP {status}: {body}"
+    )
+}
+
 /// Tool text for a proxy request that never got an HTTP response.
 ///
 /// A connect failure means nothing accepted a connection at `XERJ_URL`
 /// (#2079). The raw client error does not say so, and agents then drop xerj
 /// for the session. HTTP statuses never reach here: a 401 is a response and
 /// stays `XERJ returned HTTP 401: …`.
+///
+/// A failure that went through an env proxy names that proxy instead (#2379).
+/// Connection refused on the proxy is not "no node is listening".
+/// `McpXc` keeps the "no response" wording `xerj_code_search` tests for when
+/// the node accepts and then stays silent. A refused connect still goes
+/// through [`transport_failure_text`], so a dead proxy is not reported as a
+/// dead node.
+fn mcp_xc_send_error(base_url: &str, request_url: &str, err: &reqwest::Error) -> String {
+    if err.is_timeout() {
+        let detail = error_detail(err);
+        return match env_proxy_label(base_url) {
+            Some(proxy) => format!("no response from {request_url} via proxy {proxy}: {detail}"),
+            None => format!("no response from {request_url}: {detail}"),
+        };
+    }
+    transport_failure_text(base_url, request_url, err)
+}
+
 pub(crate) fn transport_failure_text(
     base_url: &str,
     request_url: &str,
     err: &reqwest::Error,
 ) -> String {
+    if let Some(proxy) = env_proxy_label(base_url) {
+        return format!(
+            "request to {request_url} failed via proxy {proxy}: {}",
+            error_detail(err)
+        );
+    }
     if node_unreachable(err) {
         node_not_listening(base_url, &error_detail(err))
     } else {
@@ -3162,6 +3441,53 @@ fn search_match_query(name: &str, args: &Value) -> Option<String> {
     }
 }
 
+/// Catalog + mtime check for `xerj_search`, after the search has returned.
+///
+/// The walk uses a blocking HTTP client, so it runs on a blocking thread.
+/// It starts only once the search result is in hand: a second connection
+/// during the search would be a different request, and a failed search has
+/// nothing to annotate. Other tools do not share this path: `xerj code`'s
+/// 30-day refusal stays on `xerj_code_search`.
+async fn search_staleness(
+    ctx: &Ctx,
+    name: &str,
+    args: &Value,
+) -> Option<xerj_autoindex::staleness::StalenessHint> {
+    if name != "xerj_search" {
+        return None;
+    }
+    let prefix = xerj_autoindex::search::prefix_from_scope(
+        args.get("prefix").and_then(Value::as_str),
+        args.get("index").and_then(Value::as_str),
+    )?;
+    let url = ctx.base_url.clone();
+    let key = api_key_from_header(ctx.auth.clone());
+    tokio::task::spawn_blocking(move || {
+        xerj_autoindex::staleness::check(&url, key.as_deref(), &prefix)
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// Attach a staleness hint after the token budget so a tight budget cannot
+/// drop the warning. An error result is returned unchanged.
+fn apply_staleness(result: Value, hint: Option<xerj_autoindex::staleness::StalenessHint>) -> Value {
+    let Some(hint) = hint else {
+        return result;
+    };
+    if result.get("isError") == Some(&Value::Bool(true)) {
+        return result;
+    }
+    let Some(text) = result.pointer("/content/0/text").and_then(Value::as_str) else {
+        return result;
+    };
+    tool_text(
+        xerj_autoindex::staleness::merge_response_json(text, &hint),
+        false,
+    )
+}
+
 async fn engine_request(
     ctx: &Ctx,
     method: Method,
@@ -3187,10 +3513,26 @@ async fn engine_request(
     match req.send().await {
         Ok(resp) => {
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            // The status line arrived, but the body may still fail (the
+            // connection drops, the request deadline fires mid-body). An empty
+            // string here would turn that into an empty *successful* result.
+            let text = match resp.text().await {
+                Ok(text) => text,
+                Err(e) => {
+                    return tool_text(
+                        format!(
+                            "XERJ returned HTTP {status}, but the response body from {url} \
+                             could not be read: {e}"
+                        ),
+                        true,
+                    );
+                }
+            };
             if status.is_success() {
                 let text = match demote_page {
-                    Some(page) => apply_search_path_demotion(&text, page),
+                    Some(page) => {
+                        apply_search_path_demotion(&text, page, match_query.unwrap_or(""))
+                    }
                     None => text,
                 };
                 let text = match match_query {
@@ -3208,9 +3550,17 @@ async fn engine_request(
             } else if is_memory_store_path(path) {
                 if let Some(explained) = memory_flood_tool_text(ctx, &text).await {
                     tool_text(explained, true)
+                } else if let Some(proxied) =
+                    proxy_status_failure(&ctx.base_url, &url, status.as_u16(), &text)
+                {
+                    tool_text(proxied, true)
                 } else {
                     tool_text(format!("XERJ returned HTTP {status}: {text}"), true)
                 }
+            } else if let Some(proxied) =
+                proxy_status_failure(&ctx.base_url, &url, status.as_u16(), &text)
+            {
+                tool_text(proxied, true)
             } else {
                 tool_text(format!("XERJ returned HTTP {status}: {text}"), true)
             }
@@ -3230,6 +3580,65 @@ mod tests {
     fn built(r: Result<BuiltRequest, String>) -> (Method, String, Value) {
         let (m, p, b) = r.unwrap();
         (m, p, b.expect("builder should carry a body"))
+    }
+
+    /// #2379: a proxy 503 names the proxy. A node 400 does not, because that
+    /// status is not one a proxy synthesises on the way to the upstream.
+    #[test]
+    fn proxy_status_failure_names_the_proxy_only_for_gateway_statuses() {
+        let url = "http://node.example:9200/docs/_search";
+        let proxy = "http://proxy.internal:8888";
+        let msg = proxy_gateway_message(url, proxy, 503, "upstream");
+        // The env matcher is covered by tests/loopback_proxy.rs. This pins
+        // the sentence, and that a loopback target and a node 400 are not
+        // rewritten into it.
+        assert!(msg.contains(proxy), "{msg}");
+        assert!(msg.contains("HTTP 503"), "{msg}");
+        assert!(msg.contains("went through proxy"), "{msg}");
+        assert!(!msg.contains("XERJ returned"), "{msg}");
+        assert!(proxy_status_failure("http://127.0.0.1:9200", url, 503, "x").is_none());
+        assert!(proxy_status_failure("http://node.example:9200", url, 400, "nope").is_none());
+    }
+
+    #[test]
+    fn proxy_label_drops_userinfo() {
+        let uri: http::Uri = "http://user:secret@proxy.internal:8888".parse().unwrap();
+        let label = redact_proxy(&uri);
+        assert_eq!(label, "http://proxy.internal:8888");
+        assert!(!label.contains("secret"), "{label}");
+        assert!(!label.contains("user"), "{label}");
+        let socks: http::Uri = "socks5://127.0.0.1:1080".parse().unwrap();
+        assert_eq!(redact_proxy(&socks), "socks5://127.0.0.1:1080");
+    }
+
+    /// `xerj_code_search` talks to the node through `McpXc`, not `Ctx.client`,
+    /// so it needs a deadline of its own: a node that accepts the connection
+    /// and never answers must give an error, not hang the tool call (and with
+    /// it the stdio loop, which serves one request at a time).
+    #[test]
+    fn code_search_transport_gives_up_on_a_silent_node() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        // Accept, then hold the connection open without a byte of reply.
+        std::thread::spawn(move || {
+            let held = listener.accept();
+            std::thread::sleep(Duration::from_secs(10));
+            drop(held);
+        });
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let http = McpXc {
+                base_url,
+                auth: None,
+                timeout: Duration::from_millis(300),
+            };
+            let _ = tx.send(http.request("GET", "/_cat/indices/x?format=json", None));
+        });
+        let res = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("McpXc::request still pending after 5 s against a silent node");
+        let err = res.expect_err("a silent node is not a reply");
+        assert!(err.contains("no response from"), "{err}");
     }
 
     /// #2079: the sentence itself, with no network. The connect-vs-HTTP split
@@ -3358,6 +3767,176 @@ mod tests {
             let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, header.as_bytes()).await;
             let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, body.as_bytes()).await;
         });
+    }
+
+    /// A node that accepts every connection and never sends a byte.
+    async fn silent_node() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((sock, _)) = listener.accept().await {
+                held.push(sock);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// `serve` over in-memory pipes: the client's stdin writer and the lines
+    /// the server writes to its stdout.
+    fn stdio_session(
+        base_url: String,
+        timeout: Duration,
+    ) -> (
+        tokio::io::DuplexStream,
+        tokio::io::Lines<BufReader<tokio::io::DuplexStream>>,
+    ) {
+        let (client_in, server_in) = tokio::io::duplex(64 * 1024);
+        let (server_out, client_out) = tokio::io::duplex(64 * 1024);
+        let ctx = Ctx {
+            client: reqwest::Client::builder().timeout(timeout).build().unwrap(),
+            base_url,
+            auth: None,
+        };
+        tokio::spawn(serve(ctx, BufReader::new(server_in), server_out));
+        (client_in, BufReader::new(client_out).lines())
+    }
+
+    async fn send_line(stdin: &mut tokio::io::DuplexStream, msg: Value) {
+        stdin
+            .write_all(format!("{msg}\n").as_bytes())
+            .await
+            .unwrap();
+    }
+
+    fn stalled_search(id: u64) -> Value {
+        json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": {
+            "name": "xerj_search", "arguments": {"index": "docs", "query": "retry"}}})
+    }
+
+    /// #2390: a tool call waiting on a stalled node must not hold up `ping`.
+    #[tokio::test]
+    async fn ping_is_answered_while_a_tool_call_waits_on_the_node() {
+        let (mut stdin, mut stdout) = stdio_session(silent_node().await, Duration::from_secs(3));
+        send_line(&mut stdin, stalled_search(2)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(
+            &mut stdin,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+        )
+        .await;
+        let line = tokio::time::timeout(Duration::from_secs(1), stdout.next_line())
+            .await
+            .expect("no reply within 1 s: ping queued behind the stalled tool call")
+            .unwrap()
+            .unwrap();
+        let reply: Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(reply["id"], 3, "{reply}");
+        assert_eq!(reply["result"], json!({}), "{reply}");
+    }
+
+    /// End of input still answers the calls that were running, then closes
+    /// stdout: the serial loop always replied before it returned.
+    #[tokio::test]
+    async fn end_of_input_waits_for_running_calls_and_answers_them() {
+        let (mut stdin, mut stdout) =
+            stdio_session(silent_node().await, Duration::from_millis(300));
+        send_line(&mut stdin, stalled_search(2)).await;
+        drop(stdin);
+        let mut replies = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Ok(Some(line)) = stdout.next_line().await {
+                replies.push(serde_json::from_str::<Value>(&line).unwrap());
+            }
+        })
+        .await
+        .expect("stdout was not closed after the last reply");
+        assert_eq!(replies.len(), 1, "{replies:?}");
+        assert_eq!(replies[0]["id"], 2, "{replies:?}");
+        assert_eq!(replies[0]["result"]["isError"], true, "{replies:?}");
+    }
+
+    /// A batch keeps its old shape: each request answered on its own line.
+    #[tokio::test]
+    async fn a_batch_is_answered_one_line_per_request() {
+        let (mut stdin, mut stdout) =
+            stdio_session(silent_node().await, Duration::from_millis(300));
+        send_line(
+            &mut stdin,
+            json!([{"jsonrpc": "2.0", "id": 5, "method": "ping"},
+                   {"jsonrpc": "2.0", "method": "notifications/initialized"},
+                   {"jsonrpc": "2.0", "id": 6, "method": "ping"}]),
+        )
+        .await;
+        drop(stdin);
+        let mut ids = Vec::new();
+        while let Ok(Some(line)) = stdout.next_line().await {
+            ids.push(serde_json::from_str::<Value>(&line).unwrap()["id"].clone());
+        }
+        assert_eq!(ids, vec![json!(5), json!(6)]);
+    }
+
+    /// #2390: `notifications/cancelled` stops the request it names, and no
+    /// response is written for it, even after the request would have finished.
+    #[tokio::test]
+    async fn a_cancelled_tool_call_gets_no_response() {
+        // The search would end after two 500 ms deadlines (mapping, then search).
+        let (mut stdin, mut stdout) =
+            stdio_session(silent_node().await, Duration::from_millis(500));
+        send_line(&mut stdin, stalled_search(2)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send_line(
+            &mut stdin,
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                   "params": {"requestId": 2, "reason": "test"}}),
+        )
+        .await;
+        send_line(
+            &mut stdin,
+            json!({"jsonrpc": "2.0", "id": 3, "method": "ping"}),
+        )
+        .await;
+        let mut ids = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_millis(2500), async {
+            while let Ok(Some(line)) = stdout.next_line().await {
+                ids.push(serde_json::from_str::<Value>(&line).unwrap()["id"].clone());
+            }
+        })
+        .await;
+        assert!(ids.contains(&json!(3)), "ping was not answered: {ids:?}");
+        assert!(
+            !ids.contains(&json!(2)),
+            "the cancelled call was answered: {ids:?}"
+        );
+    }
+
+    /// A 200 whose body cannot be read in full (the connection drops partway,
+    /// or the request deadline fires mid-body) is a failure, not an empty
+    /// successful result: an agent reading `isError: false` with no text would
+    /// conclude the query matched nothing.
+    #[tokio::test]
+    async fn engine_request_reports_a_body_that_could_not_be_read() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0u8; 8192];
+            let _ = tokio::io::AsyncReadExt::read(&mut sock, &mut buf).await;
+            // Promise 100 bytes, send 12, hang up.
+            let reply = "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nContent-Type: application/json\r\n\r\n{\"hits\":{\"to";
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, reply.as_bytes()).await;
+        });
+        let ctx = Ctx {
+            client: reqwest::Client::new(),
+            base_url: format!("http://{addr}"),
+            auth: None,
+        };
+        let res = engine_request(&ctx, Method::Get, "/docs/_search", None, None, None, None).await;
+        assert_eq!(res["isError"], true, "{res}");
+        let text = res["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("could not be read"), "{text}");
     }
 
     /// #2284: the server already explained the flood-stage block. The tool
@@ -3686,6 +4265,16 @@ mod tests {
         assert_eq!(path, "/ax-*/_search");
     }
 
+    /// #2405: `"a,b"` used to sanitise into the single prefix `a-b` and
+    /// search `a-b-*`. The resolver refuses a comma; the error must keep
+    /// the `prefix` argument name so the caller knows which field failed.
+    #[test]
+    fn search_prefix_refuses_a_comma_list() {
+        let err = build_search(&json!({"prefix": "a,b"})).unwrap_err();
+        assert!(err.starts_with("`prefix` "), "{err}");
+        assert!(err.contains("a-*,b-*"), "{err}");
+    }
+
     /// #1961: a plain-string query on a prose corpus must not name the code
     /// legs. Autoindex indices are created `strict_unknown_fields`, so the
     /// old body (`match_phrase` on `defs`, `term` on `name`) was an HTTP 400
@@ -3824,7 +4413,7 @@ mod tests {
             {"_id":"s","_score":30.0,"_source":{"ax_path":"tests/contract.rs"}},
             {"_id":"x","_score":1.0,"_source":{"ax_path":"src/extra.rs"}}
         ]}}"#;
-        let text = apply_search_path_demotion(raw, 3);
+        let text = apply_search_path_demotion(raw, 3, "");
         let resp: Value = serde_json::from_str(&text).unwrap();
         let paths: Vec<&str> = resp["hits"]["hits"]
             .as_array()
@@ -3842,7 +4431,7 @@ mod tests {
         );
         assert_eq!(resp["hits"]["hits"][2]["_score"], json!(6.0));
         assert_eq!(resp["hits"]["hits"][1]["_score"], json!(9.0));
-        assert_eq!(apply_search_path_demotion("not json", 3), "not json");
+        assert_eq!(apply_search_path_demotion("not json", 3, ""), "not json");
     }
 
     /// A numeric mapping of a code field drops that leg (#1284 via #1601):
@@ -4332,7 +4921,7 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_six_search_tools_advertise_max_tokens() {
+    fn search_tools_advertise_their_budget_contracts() {
         let specs = tool_specs();
         let search_tools = [
             "xerj_def",
@@ -4372,6 +4961,15 @@ mod tests {
                         .unwrap_or(false),
                     "{name}: `max_tokens` is optional"
                 );
+            } else if name == "xerj_batch_search" {
+                // Unlike the single-search adapter, a batch must preserve
+                // every item's outcome and refuse an undersized envelope.
+                let d = prop["description"].as_str().expect("described");
+                assert!(d.contains(token_budget::TOKENIZER_NAME), "{d}");
+                assert!(d.contains("NEVER exceeds"), "{d}");
+                assert!(d.contains("ordered item outcomes"), "{d}");
+                assert!(d.contains("Refuses"), "{d}");
+                assert_eq!(prop["minimum"], token_budget::MIN_MAX_TOKENS);
             } else if name == "xerj_hub_ask" {
                 // The hub's own budget (docs/hub-v2-grpc-mcp-notes.md): the
                 // `xerj ask --max-tokens` cap, a SOFT ~4-chars-a-token trim of
@@ -5364,7 +5962,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 22);
         for n in [
             "xerj_def",
             "xerj_search",
@@ -5413,6 +6011,10 @@ mod tests {
         assert!(
             desc.contains("omitted when no term is located"),
             "a missing match_line is not a line number: {desc}"
+        );
+        assert!(
+            desc.contains("index_stale") && desc.contains("4096"),
+            "xerj_search must describe the staleness hint: {desc}"
         );
         assert!(at("xerj_field_report") < at("xerj_corpus_feedback"));
         assert!(at("xerj_corpus_feedback") < at("xerj_hub_find"));
@@ -5466,6 +6068,32 @@ mod tests {
         assert_eq!(autoindex_tools, vec!["xerj_autoindex_remove"]);
     }
 
+    #[test]
+    fn a_staleness_hint_is_added_to_a_search_result_and_an_error_is_left_alone() {
+        let hint = xerj_autoindex::staleness::StalenessHint {
+            code: "index_stale",
+            reason: "The index for prefix `ok-knowledge` was last built at 2026-10-23T23:46:52Z. `docs/page.md` is newer than that index, so a page on disk can be missing from these results. Reindex with: xerj autoindex /corpus --prefix ok-knowledge".into(),
+            indexed_at: "2026-10-23T23:46:52Z".into(),
+            root: "/corpus".into(),
+            run_id: "run-20261023T234652Z-2c98-0000".into(),
+            prefix: "ok-knowledge".into(),
+            path: "docs/page.md".into(),
+            change: "newer",
+        };
+        let ok = tool_text(r#"{"hits":{"hits":[]}}"#, false);
+        let merged = apply_staleness(ok, Some(hint.clone()));
+        assert_eq!(merged["isError"], false);
+        let text = merged["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["_xerj"]["hints"][0]["code"], "index_stale");
+        assert_eq!(parsed["_xerj"]["hints"][0]["path"], "docs/page.md");
+        assert!(parsed["hits"]["hits"].as_array().unwrap().is_empty());
+
+        let err = tool_text("XERJ returned HTTP 400: no", true);
+        let kept = apply_staleness(err.clone(), Some(hint));
+        assert_eq!(kept, err);
+    }
+
     /// A process with no hub signing key must not advertise tools that can
     /// only answer with the no-key message. The count `--help` prints is that
     /// same list, so the two cannot disagree.
@@ -5480,23 +6108,23 @@ mod tests {
                 .collect()
         };
         let without = names(false);
-        assert_eq!(without.len(), 18, "{without:?}");
+        assert_eq!(without.len(), 19, "{without:?}");
         assert!(
             without.iter().all(|n| !n.starts_with("xerj_hub_")),
             "{without:?}"
         );
         let with = names(true);
-        assert_eq!(with.len(), 21, "{with:?}");
+        assert_eq!(with.len(), 22, "{with:?}");
         for n in ["xerj_hub_find", "xerj_hub_def", "xerj_hub_ask"] {
             assert!(with.iter().any(|name| name == n), "missing {n}");
         }
 
         let help = tools_paragraph(false);
-        assert!(help.contains("proxies 18 tools"), "{help}");
+        assert!(help.contains("proxies 19 tools"), "{help}");
         assert!(!help.contains("xerj_hub_"), "{help}");
         assert!(help.contains("~/xerj-data"), "{help}");
         let help = tools_paragraph(true);
-        assert!(help.contains("proxies 21 tools"), "{help}");
+        assert!(help.contains("proxies 22 tools"), "{help}");
         assert!(help.contains("xerj_hub_ask"), "{help}");
         assert!(help.contains("serves 3 Corpus Hub tools"), "{help}");
     }
@@ -5729,5 +6357,156 @@ mod tests {
             Some("ApiKey real-key"),
             "an empty candidate must be skipped over, not stop the search"
         );
+    }
+
+    /// #2339: MCP `xerj_code_search` is the same renderer as `xerj code`.
+    /// An own corpus keeps UNKNOWN in the header and drops the do-not-copy
+    /// banner. The same passage from a corpus that is not marked own still
+    /// carries the banner.
+    #[test]
+    fn code_search_own_corpus_omits_the_unidentified_copy_banner() {
+        let home = tempfile::tempdir().unwrap();
+        let previous = std::env::var("XERJ_CODE_HOME").ok();
+        std::env::set_var("XERJ_CODE_HOME", home.path());
+        struct Restore(Option<String>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                match &self.0 {
+                    Some(value) => std::env::set_var("XERJ_CODE_HOME", value),
+                    None => std::env::remove_var("XERJ_CODE_HOME"),
+                }
+            }
+        }
+        let _restore = Restore(previous);
+
+        let write_corpus = |name: &str, own: bool| {
+            let dir = home.path().join("corpora").join(name);
+            std::fs::create_dir_all(dir.join("myrepo")).unwrap();
+            let own_json = if own { ",\"own\":true" } else { "" };
+            std::fs::write(
+                dir.join("corpus.json"),
+                format!(
+                    "{{\"corpus\":\"{name}\"{own_json},\"repos\":[{{\"repo\":\"myrepo\",\"url\":\"u\",\"licence\":\"UNKNOWN\"}}]}}"
+                ),
+            )
+            .unwrap();
+            std::fs::create_dir_all(home.path().join("state")).unwrap();
+            // An unparsable stamp disables the age refusal; this test is
+            // about the banner, not the clock.
+            std::fs::write(
+                home.path().join("state").join(format!("{name}.json")),
+                format!(
+                    "{{\"corpus\":\"{name}\",\"indexed_at\":\"fresh\",\"prefix\":\"xc-{name}\",\"url\":\"u\",\"autoindex_exit\":0,\"salvaged\":false,\"build\":\"b1\",\"index_prefix\":\"xc-{name}-b1\",\"state_dir\":\"/tmp/s\"}}"
+                ),
+            )
+            .unwrap();
+        };
+        write_corpus("owned", true);
+        write_corpus("other", false);
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let mapping = r#"{"idx":{"mappings":{"properties":{"body":{"type":"text"}}}}}"#;
+            let hit = r#"{"hits":{"hits":[{"_score":4.0,"_source":{"ax_path":"myrepo/src/lib.rs","line":1,"body":"fn mine() {}\n"}}]}}"#;
+            let cat = r#"[{"index":"xc-owned-b1-000"}]"#;
+            let started = std::time::Instant::now();
+            let mut served = 0;
+            while served < 6 && started.elapsed() < std::time::Duration::from_secs(20) {
+                let (mut sock, _) = match listener.accept() {
+                    Ok(pair) => pair,
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(20));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                sock.set_nonblocking(false).unwrap();
+                served += 1;
+                sock.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 4096];
+                loop {
+                    match std::io::Read::read(&mut sock, &mut tmp) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            buf.extend_from_slice(&tmp[..n]);
+                            if let Some(header_end) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+                            {
+                                let headers = String::from_utf8_lossy(&buf[..header_end]);
+                                let length = headers.lines().find_map(|line| {
+                                    let rest = line
+                                        .split_once(':')
+                                        .filter(|(name, _)| {
+                                            name.eq_ignore_ascii_case("content-length")
+                                        })?
+                                        .1;
+                                    rest.trim().parse::<usize>().ok()
+                                });
+                                let body_at = header_end + 4;
+                                if let Some(length) = length {
+                                    while buf.len() < body_at + length {
+                                        match std::io::Read::read(&mut sock, &mut tmp) {
+                                            Ok(0) | Err(_) => break,
+                                            Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                                        }
+                                    }
+                                }
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf);
+                let body = if head.contains("_cat/indices") {
+                    cat
+                } else if head.contains("_mapping") {
+                    mapping
+                } else {
+                    hit
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = std::io::Write::write_all(&mut sock, response.as_bytes());
+            }
+        });
+
+        let ctx = Ctx {
+            client: reqwest::Client::new(),
+            base_url: format!("http://{address}"),
+            auth: None,
+        };
+        let owned = block_on(call_tool(
+            &ctx,
+            &json!({"params": {"name": "xerj_code_search", "arguments": {
+                "corpus": "owned", "query": "fn mine"
+            }}}),
+        ));
+        let other = block_on(call_tool(
+            &ctx,
+            &json!({"params": {"name": "xerj_code_search", "arguments": {
+                "corpus": "other", "query": "fn mine"
+            }}}),
+        ));
+        server.join().unwrap();
+
+        let owned_text = tool_body(&owned);
+        let other_text = tool_body(&other);
+        assert_eq!(owned["isError"], false, "{owned_text}");
+        assert_eq!(other["isError"], false, "{other_text}");
+        assert!(owned_text.contains(", UNKNOWN)"), "{owned_text}");
+        assert!(owned_text.contains("fn mine()"), "{owned_text}");
+        assert!(!owned_text.contains("!!"), "{owned_text}");
+        assert!(!owned_text.contains("do not copy"), "{owned_text}");
+        assert!(
+            other_text.contains("!! UNKNOWN: adapt the APPROACH, do not copy the code"),
+            "{other_text}"
+        );
+        assert!(other_text.contains(", UNKNOWN)"), "{other_text}");
     }
 }

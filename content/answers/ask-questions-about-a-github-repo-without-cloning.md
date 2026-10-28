@@ -1,7 +1,7 @@
 ---
-title: "Ask questions about a GitHub repo without cloning it"
+title: "Ask a GitHub repo without cloning: cited file:line answers"
 h1: "Ask questions about a GitHub repo without cloning it"
-description: "xerj ask answers from a signed, pre-indexed pack of a pinned repo, with file:line, commit and licence. First answer 2.4 s with the download, then 30-40 ms."
+description: "xerj ask answers from a signed, pre-indexed pack with file:line, pinned commit and licence. Nothing to clone. Works for repos in the Corpus Hub catalogue."
 slug: "ask-questions-about-a-github-repo-without-cloning"
 cluster: "Answers for coding agents"
 question: "How can I ask questions about a GitHub repo without cloning it?"
@@ -11,6 +11,7 @@ updated: "2026-10-20"
 author: "XERJ documentation team"
 reviewer: "XERJ engineering team"
 schema_type: "TechArticle"
+structured_data: [faq]
 og_image: "og/answers-ask-questions-about-a-github-repo-without-cloning.png"
 og_image_alt: "Cover: a question routed across the 14 corpora of the signed catalogue to the snappy tile, then to a local node on port 9300 with the answer at snappy.cc:1643; cold 2,356 ms, warm 30 to 40 ms"
 agent_prompt: "Read https://xerj.org/llms.txt. Install xerj, then answer my question about the library with xerj ask (add --corpus and --def for an exact symbol). Quote the corpus, the pinned commit, the file:line and the licence line it prints, and say so when it exits 1 with no match."

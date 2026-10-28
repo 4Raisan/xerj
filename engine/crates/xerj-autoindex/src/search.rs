@@ -11,6 +11,7 @@
 use std::collections::BTreeSet;
 
 use crate::esclient::Es;
+use crate::staleness;
 use serde_json::{json, Value};
 use xerj_common::xccode::demote_catalog_noise;
 
@@ -23,7 +24,8 @@ USAGE:
 
 OPTIONS:
     --url <U>       node endpoint (default $XERJ_URL or http://localhost:9200)
-    --prefix <P>    index prefix to search (default \"ax\" — what `xerj autoindex` writes)
+    --prefix <P>    one index prefix to search (default \"ax\" — what `xerj autoindex` writes);
+                    no comma lists
     --api-key <K>   Authorization (or $XERJ_API_KEY; --insecure nodes need none)
     -k <N>          number of passages to return (default 5). A non-number is a
                     usage error, not a silent default
@@ -37,6 +39,12 @@ EXAMPLE:
 
 SEE ALSO:
     xerj def <symbol>    exact go-to-definition when you already know the name
+
+When the autoindex catalog records a folder on this machine for --prefix and a
+file there is newer than the last index, or an indexed file has been removed,
+the command prints the last index time and a reindex command, then prints the
+passages. The check stats at most 4096 entries, stops after 100ms, and skips
+hidden and ignored paths.
 ";
 
 /// Extract the `_passage` snippet from a hit. The engine returns it under
@@ -83,6 +91,23 @@ pub(crate) fn search_mode_refusal(asked: &str) -> String {
          xerj code --mode semantic and xerj code --mode hybrid are the commands that take a mode; \
          unless the node was started with --embed-mode neural they still embed with lexical feature hashing."
     )
+}
+
+/// #2458: an unknown flag got "unexpected argument" followed by the whole
+/// USAGE, and an agent read the help dump as the answer and gave up. Name the
+/// flag on one line, and point the names agents guess first at the real one.
+pub(crate) fn unknown_flag_refusal(flag: &str) -> String {
+    let name = flag.split_once('=').map_or(flag, |(name, _)| name);
+    let hint = match name {
+        "--index" | "--indices" | "-i" => {
+            " Use --prefix <P> to choose the indices: it searches <P>-* (default \"ax\")."
+        }
+        "--max-hits" | "--size" | "--limit" | "--top" | "--top-k" | "-n" => {
+            " Use -k <N> for the number of passages (default 5)."
+        }
+        _ => "",
+    };
+    format!("xerj search: unknown flag '{name}'.{hint} Run `xerj search --help` for every option.")
 }
 
 /// One line for the human printer when the node says this lexical query
@@ -349,10 +374,19 @@ pub fn search_fetch_size(k: usize) -> usize {
 /// of test/example/fuzz/bench paths and the page is trimmed back to `page`
 /// after the existing same-path and catalog passes. A prose corpus skips
 /// the penalty and the trim — the node was asked for `page` hits already.
-pub(crate) fn rank_plain_search_hits(hits: &mut Vec<Value>, code_corpus: bool, page: usize) {
+pub(crate) fn rank_plain_search_hits(
+    hits: &mut Vec<Value>,
+    code_corpus: bool,
+    page: usize,
+    query: &str,
+) {
     if code_corpus {
         crate::def::penalize_demoted_paths(hits);
     }
+    // A one-word symbol (`type Token`) must not stay ahead of a hit that
+    // covers more terms of a multi-term question (#2327). One-token lookups
+    // are unchanged inside that pass.
+    xerj_common::xccode::render::demote_sparse_definition_hits(hits, query);
     prefer_citable_line_on_the_same_path(hits);
     let mut ordered = demote_catalog_noise(std::mem::take(hits));
     if code_corpus {
@@ -377,9 +411,12 @@ pub(crate) struct CorpusSnapshot {
 /// `xerj def` has no hits.
 ///
 /// A prefix that matches no index exits `1` and names the prefixes already
-/// on the node. The `xerj autoindex <folder>` hint is only for a node whose
-/// catalog and index list are both empty — a miss against a real corpus is
-/// not a reason to tell the operator to index again.
+/// on the node, in that same line. The line says it is not a search result:
+/// it returns before any query runs, and a one-line reading of "no indices
+/// named …" was taken for an instant empty search (#2321). The
+/// `xerj autoindex <folder>` hint is only for a node whose catalog and index
+/// list are both empty — a miss against a real corpus is not a reason to
+/// tell the operator to index again.
 pub(crate) fn empty_lookup_report(
     command: &str,
     prefix: &str,
@@ -391,7 +428,7 @@ pub(crate) fn empty_lookup_report(
     let prefix_absent = matches!(snap.under_prefix, Some(ref names) if names.is_empty());
     let mut lines = Vec::new();
     if prefix_absent {
-        lines.push(format!("no indices named {pattern}"));
+        lines.push(missing_prefix_line(&pattern, snap));
     } else if command == "def" {
         lines.push(format!("no definition in {pattern} for: {query}"));
         lines.push(format!(
@@ -418,15 +455,21 @@ pub(crate) fn empty_lookup_report(
     if catalog_empty {
         lines.push("(index a relevant repo first: xerj autoindex <folder>)".to_string());
     } else if let Some(prefixes) = snap.catalog_prefixes.as_ref().filter(|p| !p.is_empty()) {
-        lines.push(format!("prefixes on this node: {}", prefixes.join(", ")));
+        // The missing-prefix headline already lists these. A real miss (the
+        // prefix exists, the query did not match) still needs the line.
+        if !prefix_absent {
+            lines.push(format!("prefixes on this node: {}", prefixes.join(", ")));
+        }
         if let Some(other) = prefixes.iter().find(|p| p.as_str() != prefix) {
             lines.push(format!("try: xerj {command} --prefix {other} \"{query}\""));
         }
     } else if let Some(indices) = snap.all_indices.as_ref().filter(|n| !n.is_empty()) {
-        lines.push(format!(
-            "indices on this node: {}",
-            join_capped(indices, 20)
-        ));
+        if !prefix_absent {
+            lines.push(format!(
+                "indices on this node: {}",
+                join_capped(indices, 20)
+            ));
+        }
         lines.push(
             "the catalog lists no prefixes; --prefix is the index name before the dataset slug"
                 .to_string(),
@@ -434,6 +477,24 @@ pub(crate) fn empty_lookup_report(
     }
     let exit = if prefix_absent { 1 } else { 0 };
     (lines, exit)
+}
+
+/// The refusal line for a prefix that matches nothing.
+///
+/// Prefixes from the catalog win. Index names are the fallback when the
+/// catalog has none (an autoindex that aborted before writing a run or
+/// dataset document still left `{prefix}-{slug}` indices).
+fn missing_prefix_line(pattern: &str, snap: &CorpusSnapshot) -> String {
+    let mut line = format!("no indices named {pattern} — this is not a search result");
+    if let Some(prefixes) = snap.catalog_prefixes.as_ref().filter(|p| !p.is_empty()) {
+        line.push_str(&format!("; prefixes on this node: {}", prefixes.join(", ")));
+    } else if let Some(indices) = snap.all_indices.as_ref().filter(|n| !n.is_empty()) {
+        line.push_str(&format!(
+            "; indices on this node: {}",
+            join_capped(indices, 20)
+        ));
+    }
+    line
 }
 
 fn join_capped(items: &[String], cap: usize) -> String {
@@ -467,19 +528,41 @@ pub(crate) fn corpus_snapshot(es: &Es, prefix: &str) -> CorpusSnapshot {
     }
 }
 
-/// Distinct `prefix` values on catalog run documents, sorted. `None` when
-/// the catalog cannot be read — that is not the same as an empty catalog.
+/// Distinct `prefix` values on catalog run and dataset documents, sorted.
+///
+/// Run documents are the historical source. Dataset documents carry the same
+/// field and are written as indexing proceeds, so a run that aborted before
+/// its run document (#2321) still names the prefix. `None` when the catalog
+/// cannot be read — that is not the same as an empty catalog. A dataset
+/// query that fails leaves the run prefixes in place.
 fn catalog_run_prefixes(es: &Es) -> Option<Vec<String>> {
+    let runs = catalog_kind_body(es, "run")?;
+    let mut prefixes = prefixes_from_catalog_body(&runs);
+    if let Some(datasets) = catalog_kind_body(es, "dataset") {
+        for prefix in prefixes_from_catalog_body(&datasets) {
+            if !prefixes.contains(&prefix) {
+                prefixes.push(prefix);
+            }
+        }
+        prefixes.sort();
+    }
+    Some(prefixes)
+}
+
+fn catalog_kind_body(es: &Es, doc_kind: &str) -> Option<Value> {
     let body = json!({
         "size": 200,
-        "query": { "term": { "doc_kind": "run" } },
+        "query": { "term": { "doc_kind": doc_kind } },
         "_source": ["prefix"]
     });
-    let v = es
-        .search(xerj_common::AUTOINDEX_CATALOG_INDEX, &body)
-        .ok()?;
+    es.search(xerj_common::AUTOINDEX_CATALOG_INDEX, &body).ok()
+}
+
+fn prefixes_from_catalog_body(v: &Value) -> Vec<String> {
     let mut prefixes = BTreeSet::new();
-    let hits = v.pointer("/hits/hits").and_then(Value::as_array)?;
+    let Some(hits) = v.pointer("/hits/hits").and_then(Value::as_array) else {
+        return Vec::new();
+    };
     for hit in hits {
         if let Some(prefix) = hit.pointer("/_source/prefix").and_then(Value::as_str) {
             if !prefix.is_empty() {
@@ -487,7 +570,7 @@ fn catalog_run_prefixes(es: &Es) -> Option<Vec<String>> {
             }
         }
     }
-    Some(prefixes.into_iter().collect())
+    prefixes.into_iter().collect()
 }
 
 /// What `xerj search` / `xerj def` print when the query request itself fails.
@@ -540,8 +623,47 @@ pub struct ResolvedPrefix {
 /// characters the caller typed (`My_Proj-*`) misses the corpus those
 /// commands wrote (`my-proj-*`). `xerj search`, `xerj def`, and the
 /// `xerj_search` MCP tool all call this, so the three cannot drift.
+///
+/// A comma is refused, not a list (#2405): `a,b` sanitises into the single
+/// prefix `a-b` and would search `a-b-*`, a corpus no autoindex run wrote.
+/// The rewrite note cannot fix that silently, so the error names the stored
+/// value and the per-prefix alternatives instead.
 pub fn resolve_prefix(prefix: &str) -> Result<ResolvedPrefix, String> {
     let trimmed = prefix.trim();
+    if trimmed.contains(',') {
+        let stored = crate::dataset::sanitize_prefix(trimmed);
+        let parts: Vec<String> = trimmed
+            .split(',')
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(crate::dataset::sanitize_prefix)
+            .filter(|p| !p.is_empty())
+            .collect();
+        let mut err = format!(
+            "{trimmed:?} names more than one prefix. --prefix takes exactly one: \
+             a comma is not a list separator, and this value would have been \
+             stored as {stored:?} and searched {stored}-*, which no autoindex run wrote."
+        );
+        if parts.len() >= 2 {
+            let flags = parts
+                .iter()
+                .map(|p| format!("--prefix {p}"))
+                .collect::<Vec<_>>()
+                .join(", then ");
+            let patterns = parts
+                .iter()
+                .map(|p| format!("{p}-*"))
+                .collect::<Vec<_>>()
+                .join(",");
+            err.push_str(&format!(
+                " Run one search per prefix ({flags}), or query the node directly: \
+                 POST /{patterns}/_search"
+            ));
+        } else if let [part] = parts.as_slice() {
+            err.push_str(&format!(" Pass that part alone: --prefix {part}."));
+        }
+        return Err(err);
+    }
     if trimmed.is_empty() {
         return Err(
             "must contain at least one [a-z0-9] character; for example \"project\" searches project-*"
@@ -564,6 +686,36 @@ pub fn resolve_prefix(prefix: &str) -> Result<ResolvedPrefix, String> {
         pattern: format!("{sanitized}-*"),
         prefix: sanitized,
     })
+}
+
+/// The autoindex prefix a `xerj_search` call can be checked for staleness.
+///
+/// An explicit `prefix` wins, resolved the same way as `--prefix`. Neither
+/// argument is the CLI default `ax`. An `index` of `{prefix}-*` is that
+/// prefix. A concrete index name is not: `proj-docs` is a dataset, and
+/// guessing the prefix would check the wrong folder. Both arguments is
+/// `None` — the tool already rejects that pair.
+pub fn prefix_from_scope(prefix: Option<&str>, index: Option<&str>) -> Option<String> {
+    let prefix = prefix.map(str::trim).filter(|s| !s.is_empty());
+    let index = index.map(str::trim).filter(|s| !s.is_empty());
+    match (prefix, index) {
+        (Some(_), Some(_)) => None,
+        (Some(prefix), None) => resolve_prefix(prefix).ok().map(|r| r.prefix),
+        (None, None) => Some(DEFAULT_SEARCH_PREFIX.to_string()),
+        (None, Some(index)) => wildcard_prefix(index),
+    }
+}
+
+/// `{prefix}-*` → `prefix`. Any other pattern is not one autoindex folder.
+fn wildcard_prefix(index: &str) -> Option<String> {
+    if index.contains([',', ' ', '\t']) {
+        return None;
+    }
+    let stem = index.strip_suffix("-*")?;
+    if stem.is_empty() || stem.contains(['*', '?']) {
+        return None;
+    }
+    resolve_prefix(stem).ok().map(|r| r.prefix)
 }
 
 /// Stderr note when the stored prefix is not the characters the caller typed.
@@ -652,6 +804,10 @@ fn parse_search_cli(
                 return Ok(SearchCli::Refuse);
             }
             other if !other.starts_with('-') && query.is_none() => query = Some(other.to_string()),
+            other if other.starts_with('-') => {
+                eprintln!("{}", unknown_flag_refusal(other));
+                return Ok(SearchCli::Refuse);
+            }
             other => return Err(format!("unexpected argument '{other}'")),
         }
     }
@@ -667,6 +823,21 @@ fn parse_search_cli(
 }
 
 /// Entry point for the `search` subcommand. Returns a process exit code.
+/// Start the staleness check on its own thread so it overlaps the search.
+/// The check uses its own blocking client with a short timeout.
+fn spawn_staleness_check(
+    url: &str,
+    api_key: Option<&str>,
+    prefix: &str,
+) -> std::thread::JoinHandle<Option<staleness::StalenessHint>> {
+    let (url, api_key, prefix) = (
+        url.to_string(),
+        api_key.map(str::to_string),
+        prefix.to_string(),
+    );
+    std::thread::spawn(move || staleness::check(&url, api_key.as_deref(), &prefix))
+}
+
 pub fn run_search_cli() -> i32 {
     let url = std::env::var("XERJ_URL")
         .ok()
@@ -734,7 +905,7 @@ pub fn run_search_cli() -> i32 {
         }
     }
 
-    let es = match Es::new(&url, api_key) {
+    let es = match Es::new(&url, api_key.clone()) {
         Ok(es) => es,
         Err(e) => {
             eprintln!("xerj search: could not build client for {url}: {e}");
@@ -789,7 +960,13 @@ pub fn run_search_cli() -> i32 {
     if code_corpus && k > 0 {
         body["size"] = json!(search_fetch_size(k));
     }
-    let mut resp = match es.search(&pattern, &body) {
+    // The catalog read and mtime walk run beside the query instead of after
+    // it. On a cold node the catalog's sorted run lookup was ~0.26 s on top
+    // of the search (#2422). A failed search exits without waiting for it.
+    // A missing catalog, a remote folder, or a check that hits its cap leaves
+    // the response unchanged (#2345).
+    let stale = spawn_staleness_check(&url, api_key.as_deref(), &prefix);
+    let mut resp = match es.search_without_savings(&pattern, &body) {
         Ok(v) => v,
         Err(e) => {
             eprintln!("{}", query_failure_message("search", &url, &pattern, e));
@@ -800,13 +977,17 @@ pub fn run_search_cli() -> i32 {
     // catalog partition (#1504). `--json` sees the same order as the printer.
     // The penalty trims the wider fetch back to `-k`.
     if let Some(hits) = resp.pointer_mut("/hits/hits").and_then(Value::as_array_mut) {
-        rank_plain_search_hits(hits, code_corpus, k);
+        rank_plain_search_hits(hits, code_corpus, k, &query);
     }
     // Same annotation `xerj_search` adds (#2266), so `--json` and the printed
     // header cite the matched line. `xerj code --json` is the raw server
     // body and does not share this hit post-pass.
     xerj_common::xccode::passage::annotate_search_match_lines(&mut resp, &query);
+    let hint = stale.join().ok().flatten();
     if as_json {
+        if let Some(hint) = &hint {
+            staleness::attach(&mut resp, hint);
+        }
         println!(
             "{}",
             serde_json::to_string_pretty(&resp).unwrap_or_default()
@@ -815,6 +996,9 @@ pub fn run_search_cli() -> i32 {
     }
     if let Some(note) = lexical_semantic_note(&resp) {
         eprintln!("{note}");
+    }
+    if let Some(hint) = &hint {
+        println!("{}", hint.cli_line());
     }
 
     let hits = resp
@@ -842,7 +1026,12 @@ pub fn run_search_cli() -> i32 {
         } else {
             format!("  [{kind}]")
         };
-        println!("\n─── {loc}{tag}  (score {score:.2})");
+        let archived = if xerj_common::xccode::render::source_looks_archived(&src) {
+            ", archived"
+        } else {
+            ""
+        };
+        println!("\n─── {loc}{tag}  (score {score:.2}{archived})");
         // Passage-first: `_passage` is the engine's matching snippet (an
         // array-wrapped object with a text payload); `code` is the symbol
         // declaration. Never the whole file body — that is the 9x token flood
@@ -869,6 +1058,38 @@ pub fn run_search_cli() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The CLI's catalog read must overlap the query, not follow it (#2422).
+    /// A catalog that answers after 600 ms must not hold up the caller.
+    #[test]
+    fn staleness_check_runs_beside_the_search_instead_of_after_it() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = sock.read(&mut buf);
+            std::thread::sleep(std::time::Duration::from_millis(600));
+            let body = r#"{"hits":{"hits":[]}}"#;
+            let _ = write!(
+                sock,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        });
+        let started = std::time::Instant::now();
+        let handle = spawn_staleness_check(&url, None, "sr");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "starting the check blocked for {:?}",
+            started.elapsed()
+        );
+        // No run doc in the catalog, so no hint, once it has answered.
+        assert!(handle.join().unwrap().is_none());
+        assert!(started.elapsed() >= std::time::Duration::from_millis(500));
+        server.join().unwrap();
+    }
     use xerj_common::code_query::normalize_code_search_query;
 
     /// `My_Proj` is stored as `my-proj-*`. Searching the typed characters
@@ -903,6 +1124,20 @@ mod tests {
             "ax-*"
         );
 
+        assert_eq!(prefix_from_scope(None, None).as_deref(), Some("ax"));
+        assert_eq!(
+            prefix_from_scope(Some("My_Proj"), None).as_deref(),
+            Some("my-proj")
+        );
+        assert_eq!(
+            prefix_from_scope(None, Some("ok-knowledge-*")).as_deref(),
+            Some("ok-knowledge")
+        );
+        assert_eq!(prefix_from_scope(Some("proj"), Some("proj-*")), None);
+        assert_eq!(prefix_from_scope(None, Some("proj-docs")), None);
+        assert_eq!(prefix_from_scope(None, Some("a,b-*")), None);
+        assert_eq!(prefix_from_scope(Some("___"), None), None);
+
         let empty = resolve_prefix("___").unwrap_err();
         assert!(empty.contains("[a-z0-9]"), "{empty}");
         assert!(resolve_prefix("   ").is_err());
@@ -913,6 +1148,22 @@ mod tests {
             "search must not talk about a walk it does not do: {digit}"
         );
         assert!(digit.contains("lowercase letter"), "{digit}");
+    }
+
+    /// #2405: `a,b` sanitises to `a-b` and searches `a-b-*`, a corpus no
+    /// autoindex run wrote. The comma is a refusal, not a list.
+    #[test]
+    fn a_comma_list_is_refused_not_joined() {
+        let err = resolve_prefix("a,b").unwrap_err();
+        assert!(err.contains("\"a-b\""), "{err}");
+        assert!(err.contains("a-*,b-*"), "{err}");
+        assert!(err.contains("--prefix a"), "{err}");
+        assert!(err.contains("--prefix b"), "{err}");
+        let err = resolve_prefix(" refsec , refdoc ").unwrap_err();
+        assert!(err.contains("refsec-*,refdoc-*"), "{err}");
+        let err = resolve_prefix("My_Proj,Other").unwrap_err();
+        assert!(err.contains("my-proj-*,other-*"), "{err}");
+        assert!(prefix_from_scope(Some("a,b"), None).is_none());
     }
 
     #[test]
@@ -1004,6 +1255,36 @@ mod tests {
                 SearchCli::Refuse => panic!("refusal from {args:?}"),
             }
         }
+    }
+
+    /// #2458: a guessed flag is refused by name, with the real flag when the
+    /// guess is a common one, not answered with the USAGE dump.
+    #[test]
+    fn an_unknown_flag_is_named_not_answered_with_usage() {
+        for args in [
+            vec!["--index", "docs", "needle"],
+            vec!["needle", "--max-hits", "5"],
+            vec!["--max-hits=5", "needle"],
+            vec!["--bogus", "needle"],
+        ] {
+            let parsed = parse_search_cli(words(&args).into_iter(), String::new(), None)
+                .unwrap_or_else(|e| panic!("{args:?} took the USAGE path: {e}"));
+            assert!(matches!(parsed, SearchCli::Refuse), "{args:?}: {parsed:?}");
+        }
+        let index = unknown_flag_refusal("--index");
+        assert!(index.contains("unknown flag '--index'"), "{index}");
+        assert!(index.contains("--prefix <P>"), "{index}");
+        let hits = unknown_flag_refusal("--max-hits=5");
+        assert!(hits.contains("unknown flag '--max-hits'"), "{hits}");
+        assert!(hits.contains("-k <N>"), "{hits}");
+        let other = unknown_flag_refusal("--bogus");
+        assert!(other.contains("unknown flag '--bogus'"), "{other}");
+        assert!(other.contains("xerj search --help"), "{other}");
+        assert!(!other.contains("USAGE"), "{other}");
+        // A second positional is still a usage error, not a flag refusal.
+        let err = parse_search_cli(words(&["one", "two"]).into_iter(), String::new(), None)
+            .expect_err("two queries");
+        assert!(err.contains("unexpected argument 'two'"), "{err}");
     }
 
     #[test]
@@ -1516,9 +1797,17 @@ mod tests {
         let mapped = names_of(&["message", "ts", "host"]);
         let body = search_query_body_for_mapping("SIP 403 Forbidden", 3, Some(&mapped), None);
         let should = body["query"]["bool"]["should"].as_array().unwrap();
-        assert_eq!(should.len(), 2, "{body}");
+        // Recall multi_match, the exact-phrase leg, then the two coverage
+        // clauses a three-token question adds (#2327).
+        assert_eq!(should.len(), 4, "{body}");
         assert_eq!(should[0]["multi_match"]["fields"], json!(["message"]));
+        assert!(should[2].get("constant_score").is_some(), "{body}");
+        assert!(should[3].get("constant_score").is_some(), "{body}");
         assert_eq!(phrase_fields(&body), vec!["message"], "{body}");
+        let rendered = body["query"].to_string();
+        assert!(!rendered.contains("\"code\""), "{rendered}");
+        assert!(!rendered.contains("\"name\""), "{rendered}");
+        assert!(!rendered.contains("\"defs\""), "{rendered}");
     }
 
     /// Fields named by the exact-phrase legs, in order. The `defs` phrase
@@ -1571,6 +1860,18 @@ mod tests {
         assert!(should[1].pointer("/match_phrase/defs").is_some(), "{body}");
         assert!(should[2].pointer("/term/name").is_some(), "{body}");
         assert_eq!(phrase_fields(&body), vec!["body"], "{body}");
+        // Three content tokens (glue word "the" is dropped) grow the coverage
+        // clauses. A one-token lookup above does not.
+        assert!(
+            should.iter().any(|c| c.get("constant_score").is_some()),
+            "{body}"
+        );
+        assert!(
+            !search_query_body("Token", 5)
+                .to_string()
+                .contains("constant_score"),
+            "an exact symbol lookup must not grow a coverage clause"
+        );
     }
 
     /// A content field some index maps as numeric is dropped from the
@@ -1670,6 +1971,15 @@ mod tests {
         );
         assert_eq!(exit, 1);
         let text = lines.join("\n");
+        let headline = lines.first().expect("headline");
+        assert!(
+            headline.starts_with("no indices named typo-* — this is not a search result"),
+            "{headline}"
+        );
+        assert!(
+            headline.contains("prefixes on this node: eng, sled"),
+            "the refusal line itself must name the prefixes: {headline}"
+        );
         assert!(text.contains("no indices named typo-*"), "{text}");
         assert!(text.contains("prefixes on this node: eng, sled"), "{text}");
         assert!(
@@ -1791,12 +2101,34 @@ mod tests {
         );
         assert_eq!(exit, 1);
         let text = lines.join("\n");
+        let headline = lines.first().expect("headline");
+        assert!(
+            headline.contains("indices on this node: sled-docs, eng-logs"),
+            "index names stand in for prefixes on the refusal line: {headline}"
+        );
         assert!(
             text.contains("indices on this node: sled-docs, eng-logs"),
             "{text}"
         );
         assert!(text.contains("catalog lists no prefixes"), "{text}");
         assert!(!text.contains("xerj autoindex"), "{text}");
+    }
+
+    #[test]
+    fn catalog_prefix_values_keep_dataset_documents_and_drop_an_empty_prefix() {
+        let body = json!({
+            "hits": {"hits": [
+                {"_source": {"doc_kind": "dataset", "prefix": "repo"}},
+                {"_source": {"doc_kind": "run", "prefix": "repo"}},
+                {"_source": {"doc_kind": "dataset", "prefix": "other"}},
+                {"_source": {"prefix": ""}}
+            ]}
+        });
+        assert_eq!(
+            prefixes_from_catalog_body(&body),
+            vec!["other".to_string(), "repo".to_string()]
+        );
+        assert!(prefixes_from_catalog_body(&json!({"hits": {}})).is_empty());
     }
 
     /// #1284: one index mapping `code` as `long` fails a wildcard `multi_match`
@@ -1892,7 +2224,7 @@ mod tests {
             hit("ax_path", "src/Foo.test.tsx", 14.0),
             hit("ax_path", "src/fixtures/transcript.json", 8.0),
         ];
-        rank_plain_search_hits(&mut hits, true, 5);
+        rank_plain_search_hits(&mut hits, true, 5, "");
         let paths: Vec<&str> = hits
             .iter()
             .map(|h| {
@@ -1921,7 +2253,7 @@ mod tests {
             hit("ax_path", "examples/App.tsx", 11.0),
             hit("ax_path", "src/render.tsx", 9.0),
         ];
-        rank_plain_search_hits(&mut wide, true, 5);
+        rank_plain_search_hits(&mut wide, true, 5, "");
         assert_eq!(wide.len(), 2, "a demoted hit stays when it still fits");
         assert_eq!(wide[0]["_source"]["ax_path"], "src/render.tsx");
         assert_eq!(wide[1]["_source"]["ax_path"], "examples/App.tsx");
@@ -1932,7 +2264,7 @@ mod tests {
             hit("ax_path", "tests/a.rs", 10.0),
             hit("ax_path", "fuzz/targets/b.rs", 8.0),
         ];
-        rank_plain_search_hits(&mut only_tests, true, 5);
+        rank_plain_search_hits(&mut only_tests, true, 5, "");
         assert_eq!(only_tests[0]["_source"]["ax_path"], "tests/a.rs");
         assert_eq!(only_tests[1]["_source"]["ax_path"], "fuzz/targets/b.rs");
         assert_eq!(only_tests[0]["_score"], json!(5.0));
@@ -1941,7 +2273,7 @@ mod tests {
             hit("ax_path", "tests/a.rs", 12.0),
             hit("ax_path", "src/render.tsx", 9.0),
         ];
-        rank_plain_search_hits(&mut prose, false, 1);
+        rank_plain_search_hits(&mut prose, false, 1, "");
         assert_eq!(prose.len(), 2, "a prose page is not trimmed");
         assert_eq!(prose[0]["_source"]["ax_path"], "tests/a.rs");
         assert_eq!(prose[0]["_score"], json!(12.0));
@@ -1968,7 +2300,7 @@ mod tests {
             hit("ax_path", "tests/test_model.py", 12.0),
             hit("ax_path", "src/model.py", 9.0),
         ];
-        rank_plain_search_hits(&mut hits, true, 5);
+        rank_plain_search_hits(&mut hits, true, 5, "");
         let paths: Vec<&str> = hits
             .iter()
             .map(|h| h["_source"]["ax_path"].as_str().unwrap())

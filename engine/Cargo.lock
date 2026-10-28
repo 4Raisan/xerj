@@ -7327,7 +7327,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-ai"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -7350,7 +7350,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-api"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "argon2",
@@ -7388,7 +7388,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-autoindex"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "aws-sdk-s3",
@@ -7459,15 +7459,18 @@ dependencies = [
  "tree-sitter-swift",
  "tree-sitter-typescript",
  "tree-sitter-zig",
+ "uuid",
  "walkdir",
  "xerj-common",
+ "xerj-wasm",
  "xxhash-rust",
  "zip 9.0.5",
+ "zstd",
 ]
 
 [[package]]
 name = "xerj-cluster"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7492,7 +7495,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-common"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -7512,7 +7515,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-compress"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "byteorder",
  "bytes",
@@ -7525,7 +7528,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-console-api"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7561,7 +7564,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-engine"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7617,7 +7620,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-fts"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "bitpacking",
@@ -7644,7 +7647,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-hub"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "axum",
@@ -7668,7 +7671,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-logs"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -7686,10 +7689,12 @@ dependencies = [
 
 [[package]]
 name = "xerj-mcp"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "axum",
+ "http 1.4.0",
+ "hyper-util",
  "reqwest",
  "serde_json",
  "tempfile",
@@ -7705,7 +7710,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-query"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -7721,7 +7726,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-rerank"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "reqwest",
  "serde",
@@ -7735,7 +7740,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-server"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "axum",
@@ -7763,6 +7768,7 @@ dependencies = [
  "tikv-jemallocator",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tonic-build",
  "tower 0.4.13",
@@ -7787,7 +7793,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-storage"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -7802,6 +7808,7 @@ dependencies = [
  "dashmap",
  "fst",
  "lz4_flex",
+ "memchr",
  "memmap2",
  "rayon",
  "roaring",
@@ -7813,6 +7820,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "xerj-ai",
  "xerj-common",
  "xxhash-rust",
  "zstd",
@@ -7820,7 +7828,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-vector"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "byteorder",
@@ -7838,7 +7846,7 @@ dependencies = [
 
 [[package]]
 name = "xerj-wasm"
-version = "1.0.0-rc.98"
+version = "1.0.0-rc.100"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8030,27 +8038,27 @@ dependencies = [
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.2.4"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f49c4d5f0abb602a93fb8736af2a4f4dd9512e36f7f570d66e65ff867ed3b9d"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]
 
 [[package]]
 name = "zstd-sys"
-version = "2.0.16+zstd.1.5.7"
+version = "2.1.2+zstd.1.5.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91e19ebc2adc8f83e43039e79776e3fda8ca919132d68a1fed6a5faca2683748"
+checksum = "481ada9c543b2323cbb7bbdbb5249177fbf0188ed959ed2c15e4b22421c84ed3"
 dependencies = [
  "cc",
  "pkg-config",

@@ -1581,9 +1581,14 @@ pub struct NeuralIngestProbe {
 ///     same fail-closed rule as explicit `"proxy"` (#1189). The neural
 ///     backend ships in the standard binary; a `--no-default-features` slim
 ///     build omits it and falls back to lexical, and identity reports lexical.
-///   * `"proxy"` — call an external OpenAI-compatible `/v1/embeddings`
+///   * `"proxy"` — call an external OpenAI-compatible embeddings
 ///     endpoint ([`default_endpoint`](Self::default_endpoint)). Lets
-///     customers plug in ANY embedding model / provider they already run. An explicit `mode = "proxy"` with a
+///     customers plug in ANY embedding model / provider they already run.
+///     The configured value may be a base URL ending in `/v1` (trailing
+///     slash optional) or a bare host — `/embeddings` is appended — or the
+///     full path ending in `/embeddings`, which is used unchanged. Any other
+///     path is a startup ERROR that names the URL and the
+///     `{origin}/v1/embeddings` path to set. An explicit `mode = "proxy"` with a
 ///     missing or unusable endpoint is a startup ERROR (#1189): silently
 ///     running lexical instead would write the wrong vectors into the index
 ///     while every embedding request appears to succeed.
@@ -1607,7 +1612,21 @@ pub struct EmbeddingConfig {
     /// `"proxy"`, or `"onnx-experimental"`. Unknown values are treated as
     /// `"auto"`.
     pub mode: String,
-    /// OpenAI-compatible endpoint URL (default: `""` — disabled).
+    /// OpenAI-compatible embeddings URL (default: `""` — disabled).
+    ///
+    /// Accepted forms, trailing slash optional (#2355):
+    /// * a base whose path ends in `/v1` — `/embeddings` is appended
+    ///   (`http://localhost:8000/v1` becomes
+    ///   `http://localhost:8000/v1/embeddings`)
+    /// * a bare origin (`http://host:port` or with only `/`) — `/embeddings`
+    ///   is appended
+    /// * a path that already ends in `/embeddings` — used as given
+    ///
+    /// Any other path refuses to start when [`mode`](Self::mode) is
+    /// `"proxy"` and names this URL plus `{origin}/v1/embeddings`. The value
+    /// stored here is also the proxy half of the embedder identity, so
+    /// changing it after a corpus is indexed is a different embedder even
+    /// when the resolved request URL would be the same.
     pub default_endpoint: String,
     /// Model name to request from the endpoint (default: `""`).
     pub default_model: String,
@@ -1740,9 +1759,10 @@ impl Default for EmbeddingConfig {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Sentinel value of [`LimitsConfig::max_process_memory_mb`] meaning **AUTO**:
-/// pick the process-memory cap from the machine size in binary-GiB steps
-/// (8 / 16 / 32 GiB) rather than a flat number. It is the serde default, so an
-/// omitted field resolves to AUTO; the governor intercepts it before any budget
+/// pick the process-memory cap from the machine size (half of RAM under
+/// 16 GiB, then 8 / 16 / 32 GiB) rather than a flat number. It is the serde
+/// default, so an omitted field resolves to AUTO; the governor intercepts it
+/// before any budget
 /// math, so this literal never reaches a budget as a byte count. `u64::MAX` is
 /// used because no operator sets a 16-EiB cap — it is a reserved, unmistakable
 /// "not a real MiB value" marker, distinct from `0` (uncapped, the whole
@@ -1866,14 +1886,19 @@ pub struct LimitsConfig {
     /// Ceiling on the machine size every other memory budget is derived FROM,
     /// in MiB. **Omitted / default = AUTO** ([`AUTO_PROCESS_MEMORY_MB`]): XERJ
     /// picks the cap from the effective (cgroup-aware) memory it can actually
-    /// see, in binary-GiB steps —
+    /// see —
     ///
-    ///   effective < 64 GiB             → 8 GiB cap
+    ///   effective < 16 GiB             → half of that RAM
+    ///   16 GiB ≤ effective < 64 GiB    → 8 GiB cap
     ///   64 GiB ≤ effective < 128 GiB   → 16 GiB cap
     ///   effective ≥ 128 GiB            → 32 GiB cap
     ///
     /// so a laptop is never sized for ~20 GiB of memtables and a big server is
-    /// no longer starved by a flat 8 GiB. Every budget in `ResourceGovernor`
+    /// no longer starved by a flat 8 GiB. A host under 16 GiB used to take the
+    /// 8 GiB step and then the machine, so an 8 GiB box's budget was all of
+    /// its RAM; half of RAM leaves room for the OS during a merge (#1122).
+    /// At 16 GiB the half-RAM step and the 8 GiB step are the same number.
+    /// Every budget in `ResourceGovernor`
     /// derives from `effective_memory_limit_bytes()` = min(cgroup limit, total
     /// system RAM); capping that ONE base is what makes every dependent budget
     /// shrink coherently instead of each growing its own ceiling.
@@ -1918,7 +1943,7 @@ impl Default for LimitsConfig {
             max_segment_hydration_cache_mb: 0, // 0 = 20% effective memory, no floor
             memory_watermark_percent: 95,
             disk_flood_stage_percent: 95,
-            // AUTO: tier the cap (8/16/32 GiB) off the machine at governor
+            // AUTO: half of RAM under 16 GiB, then 8/16/32 GiB, at governor
             // build time. 0 = uncapped (whole machine); N = a fixed MiB cap.
             max_process_memory_mb: AUTO_PROCESS_MEMORY_MB,
         }

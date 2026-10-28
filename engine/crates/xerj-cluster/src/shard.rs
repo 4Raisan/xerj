@@ -225,6 +225,75 @@ pub enum ShardOp {
         #[serde(default)]
         shard: u32,
     },
+    /// Partial or scripted update. The primary applies it, then copies the
+    /// stored document onto the in-sync replicas the same way an index does.
+    ///
+    /// `index` is the name the caller used. An alias is resolved on the
+    /// primary before the write is placed.
+    UpdateDoc {
+        index: String,
+        id: String,
+        /// JSON update body (`doc`, `upsert`, `doc_as_upsert`, `script`).
+        body_json: String,
+        /// JSON update query params (`refresh`, `_source`, includes, excludes).
+        params_json: String,
+    },
+    /// A bulk body whose actions belong to shards this node owns.
+    ///
+    /// The coordinating node assigns missing ids and groups actions by
+    /// primary. This node runs the local bulk pipeline, then copies each
+    /// successful index, create, update, and delete onto the in-sync replicas.
+    Bulk {
+        /// NDJSON. Action lines name `_index` and `_id`.
+        body: String,
+        default_index: Option<String>,
+        require_alias: Option<bool>,
+        default_pipeline: Option<String>,
+        /// JSON value of the URL-level `_source` filter, when one was set.
+        default_source_req_json: Option<String>,
+    },
+    /// Run `_update_by_query` on this primary's shard only.
+    ///
+    /// The coordinating node sends one of these to every primary. This node
+    /// updates documents in its user index and copies each updated document
+    /// onto the in-sync replicas. `check_only` confirms the index is open and
+    /// the pipeline can run, and writes nothing.
+    UpdateByQuery {
+        index: String,
+        /// JSON query object. Already combined with any alias filter.
+        query_json: String,
+        /// Painless source. Absent when the request has no script.
+        #[serde(default)]
+        script_source: Option<String>,
+        /// JSON script params. Absent when there is no script.
+        #[serde(default)]
+        script_params_json: Option<String>,
+        /// Ingest pipeline name. The primary runs it; pipelines are not
+        /// replicated with the index.
+        #[serde(default)]
+        pipeline: Option<String>,
+        #[serde(default)]
+        max_docs: Option<u64>,
+        scroll_size: u64,
+        #[serde(default)]
+        check_only: bool,
+    },
+    /// Run `_delete_by_query` on this primary's shard only.
+    ///
+    /// The coordinating node sends one of these to every primary. This node
+    /// deletes documents in its user index and copies each delete onto the
+    /// in-sync replicas. `check_only` confirms the index is open and writes
+    /// nothing.
+    DeleteByQuery {
+        index: String,
+        /// JSON query object. Already combined with any alias filter.
+        query_json: String,
+        #[serde(default)]
+        max_docs: Option<u64>,
+        scroll_size: u64,
+        #[serde(default)]
+        check_only: bool,
+    },
     /// Search this member's local shard only. The caller merges hits.
     Search {
         index: String,
@@ -233,6 +302,28 @@ pub enum ShardOp {
         body_json: String,
         /// JSON [`crate`] search query params. `from` and `size` match the body.
         params_json: String,
+    },
+    /// Copy this primary's live documents onto `replica_id` and, once that
+    /// copy matches, publish `replica_id` in the in-sync set.
+    ///
+    /// The caller is a replica that is placed for `shard` and is not in the
+    /// in-sync set. The primary holds the shard's replica lock across the
+    /// copy and the publish, so a document write that lands during the copy
+    /// is replicated to the new set when the lock is released. Documents are
+    /// not part of the Raft snapshot; this is the copy that fills them in.
+    BackfillReplica {
+        index: String,
+        shard: u32,
+        replica_id: String,
+    },
+    /// Delete replica-store documents whose ids are not in `ids`.
+    ///
+    /// Sent by the primary at the end of [`ShardOp::BackfillReplica`], after
+    /// the live documents have been upserted. Does not replicate further.
+    RetainReplicaDocs {
+        index: String,
+        shard: u32,
+        ids: Vec<String>,
     },
 }
 

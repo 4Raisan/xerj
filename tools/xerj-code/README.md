@@ -103,6 +103,30 @@ SPDX expression, and whether the repo is safe to adapt from or approach-only.
 See [`hub/README.md`](hub/README.md). `xerj corpus list` surfaces each corpus's
 `review.use` values.
 
+A corpus of **your own** code is a different case. A private repo often has
+no LICENSE file, so the detector records `NONE-FOUND` or `UNKNOWN` and every
+passage otherwise carries `!! …: adapt the APPROACH, do not copy the code`.
+That banner is wrong for first-party code. Mark the corpus explicitly:
+
+```sh
+xerj corpus add --own <name> <local-git-path>
+xerj corpus own <name>          # an existing corpus
+xerj corpus own <name> --off    # clear it
+```
+
+That writes `"own": true` in the corpus's `corpus.json`. The hit header still
+names the unidentified licence. `xerj code` and MCP `xerj_code_search` omit
+the do-not-copy banner for that unidentified licence only. A licence the
+detector actually named (GPL, AGPL, MPL, and the rest of the restricted
+tuple) still warns. A local path is not marked own unless you pass the flag,
+and a `--from` manifest cannot set it — that file is untrusted input.
+Re-adding the corpus keeps a marker already recorded. Hub pack licence
+classes are a separate record and are not changed by this marker.
+
+`xerj corpus index` ends with a short per-file-class summary: extensions that
+were indexed, data-file extensions left out (CSV/HDF/simulation output,
+unless `--include-data`), and ignore-rule skips.
+
 **Retrieved code is evidence, not authority.** It shows how *that* project
 solved it under *its* constraints. Cite `file:line`, and say plainly when you
 are adapting rather than copying.
@@ -124,6 +148,13 @@ the selected window's term score; a partial line is preferable to dropping the
 match. Window offsets refer to the original source, including when Unicode
 lowercasing changes its length. `--full N` changes the character limit, and
 `--full 0` keeps the explicit file-head mode.
+
+A matching definition longer than the limit is windowed the same way: the
+passage shows the part of that definition around the query terms, with a
+marker giving the window's offset from the definition's start, and the
+`kind name @ line N` label still names the definition's first line. When the
+head of the definition is already the best window, it is shown with a
+`truncated at N chars` marker.
 
 ## Hybrid retrieval, fused server-side
 

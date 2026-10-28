@@ -205,6 +205,9 @@ pub struct RemoveCfg {
     pub json: bool,
     pub quiet: bool,
     pub xerj_url_note: Option<String>,
+    /// When set, `remove` also deletes `journal.ndjson` here. The default
+    /// journal for the selected folder is deleted either way.
+    pub state_dir: Option<PathBuf>,
 }
 
 /// `xerj autoindex s3://bucket/prefix --watch`: poll a bucket and emit a change
@@ -275,12 +278,13 @@ const FRESH_HELP: &str =
     "ignore an existing resume journal and restart, rebuild the plan in place\n\
      \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20(ids stay idempotent for unchanged bytes). A file republished\n\
      \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20under a new content key drops the documents previously published for that path.\n\
-     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20It does not remove documents for a file that disappeared, and is refused on a\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20It removes documents for a file that disappeared. It is refused on a\n\
      \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20durable corpus generation — see RESUME POLICY";
 const RESUME_POLICY_HELP: &str =
     "generated --no-graph journals reconcile add, change, delete, rename, and no-op runs; \
 a --no-graph state directory written before the generation format must be rebuilt into a new \
---state-dir and --prefix; graph-enabled journals keep the existing crash-resume behaviour";
+--state-dir and --prefix; graph-enabled journals reconcile added files that fit a frozen \
+dataset, delete documents for files that disappeared, and keep crash-resume of an interrupted run";
 
 pub fn print_help() {
     println!("{}", help_text());
@@ -304,12 +308,20 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20xerj autoindex s3://<bucket>/<prefix> [OPTIONS]\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20discover + index objects in a bucket\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20(r2:// too; see OBJECT STORAGE)\n\
-         \x20\x20\x20\x20xerj autoindex map [OPTIONS]          print the discovered data map\n\
+         \x20\x20\x20\x20xerj autoindex map [OPTIONS]          print the data map of what is already indexed\n\
+         \x20\x20\x20\x20xerj autoindex map <folder> [OPTIONS] preview a folder that is not indexed yet.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Same discovery as `xerj autoindex <folder>\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20--dry-run`: walk, sniff, infer, print the plan.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Nothing is written to an index. With no\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20folder, `map` reads the catalog on --url\n\
          \x20\x20\x20\x20xerj autoindex remove --prefix <P> [--root <DIR>] [--yes]\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20list one folder's indices and catalog rows,\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20then delete them. Nothing is deleted without\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20--yes or a terminal y. Another folder under\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the same prefix is left in place\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the same prefix is left in place. An index an aborted\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20build of this folder left, with no catalog run, is\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20included. A cataloged index another folder still names\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is left in place.\n\
          \x20\x20\x20\x20xerj autoindex status [OPTIONS]       resume-journal + index progress view\n\
          \x20\x20\x20\x20xerj autoindex s3://bucket/prefix --watch [OPTIONS]\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20poll object storage and emit a change feed\n\
@@ -350,7 +362,10 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Prints those folders and continues. Without\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20this flag that run is refused and nothing\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is written. --dry-run does not bypass it\n\
-         \x20\x20\x20\x20--state-dir <PATH>   resume journal location (default ~/.xerj/autoindex/<hash>/);\n\
+         \x20\x20\x20\x20--state-dir <PATH>   resume journal location (default ~/.xerj/autoindex/<hash>/).\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20On `autoindex remove`, also deletes journal.ndjson in\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20this directory after the folder's indices are removed;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the default journal is deleted either way.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20for an s3:// source this is also where the local\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20object mirror lives, so point it at a disk with room\n\
          \x20\x20\x20\x20--endpoint-url <URL> S3-compatible endpoint for an s3:// source (MinIO,\n\
@@ -407,12 +422,13 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20--no-graph           skip relationship detection (wikilinks, local links,\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20section order, directory chains) — no edges are written\n\
          \x20\x20\x20\x20--watch              index once, then stay resident and reindex what changes.\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Needs --no-graph: the graph route refuses an ADDED file\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20(exit 3, skipped until --fresh) and ABORTS on a deletion\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20(exit 1, and every later re-run aborts too). It does\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20reindex a MODIFIED file. One OS watch per indexed\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20directory, no polling; respects the same ignore rules as\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20a re-run. docs/LIVE_REINDEXING.md has the measurements.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Needs --no-graph. A graph-path rerun sweeps a deleted\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20file (exit 3, files-removed) and indexes an added file\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20that fits a frozen dataset. A file that needs a new\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20dataset still stops (exit 3, stale-resume-plan) until\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20--fresh. One OS watch per indexed directory, no polling;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20respects the same ignore rules as a re-run.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20docs/LIVE_REINDEXING.md has the measurements.\n\
          \x20\x20\x20\x20--debounce <MS>      --watch quiet period before a pass (default 400, max\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x2060000). One editor save is several filesystem events.\n\
          \x20\x20\x20\x20--max-minutes <N>    stop and ask before indexing if phase A's MEASURED estimate\n\
@@ -445,7 +461,8 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20--drop-indexed       delete already-indexed files a reduced plan leaves\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20out. Without this flag that re-run exits 4 and lists\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20them. --plan and --yes do not agree to the deletion.\n\
-         \x20\x20\x20\x20--dry-run            walk+sniff+infer, print the plan, index nothing\n\
+         \x20\x20\x20\x20--dry-run            walk+sniff+infer, print the plan, index nothing.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20`autoindex map <folder>` is this same preview\n\
          \x20\x20\x20\x20--walk-only          stop after the walk. Prints each top-level folder's\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20file count and size, what the ignore rules would drop\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20and which rule, and the totals. Stops before hashing:\n\
@@ -476,9 +493,9 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the JSON decision request on stdout and exits 4 instead,\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20exactly like an agent-driven run. See ESTIMATE + DECISION\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20GATE.\n\
-         \x20\x20\x20\x20--dataset <SLUG>     (map) show a single dataset\n\
-         \x20\x20\x20\x20--offset <N>         (map) skip the first N dataset detail sections\n\
-         \x20\x20\x20\x20--limit <N>          (map) how many dataset detail sections to print\n\
+         \x20\x20\x20\x20--dataset <SLUG>     (map, no folder) show a single catalog dataset\n\
+         \x20\x20\x20\x20--offset <N>         (map, no folder) skip the first N dataset detail sections\n\
+         \x20\x20\x20\x20--limit <N>          (map, no folder) how many dataset detail sections to print\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20(default: all of them when there are few, otherwise\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the first page — the summary table always lists every\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20dataset)\n\
@@ -549,8 +566,10 @@ pub fn help_text_with(feedback: bool) -> String {
          \n\
          PDF EXTRACTION:\n\
          \x20\x20\x20\x20Each PDF uses a fresh process. Limits: 512 MiB input, 32 MiB worker output,\n\
-         \x20\x20\x20\x20100,000 pages, and 1.5 GiB address space on Unix. This is crash/resource\n\
-         \x20\x20\x20\x20isolation, not a security sandbox; non-Unix platforms have no OS memory cap.\n\
+         \x20\x20\x20\x20100,000 pages, and a 1.5 GiB address-space cap on Unix where the OS accepts\n\
+         \x20\x20\x20\x20RLIMIT_AS. If the OS refuses that cap (EINVAL or EPERM, as on macOS 27), the\n\
+         \x20\x20\x20\x20refusal is logged once and the worker still starts. The cap is crash isolation,\n\
+         \x20\x20\x20\x20not a security sandbox; non-Unix platforms have no OS memory cap.\n\
          \x20\x20\x20\x20Image-only pages need OCR. Page parse failures reject the whole PDF instead\n\
          \x20\x20\x20\x20of silently creating a partial index. XERJ_PDF_WORKER_BIN is a trusted,\n\
          \x20\x20\x20\x20developer-only executable override.\n\
@@ -565,7 +584,9 @@ pub fn help_text_with(feedback: bool) -> String {
          \n\
          INCREMENTAL RECONCILIATION:\n\
          \x20\x20\x20\x20Generated journals with --no-graph reconcile added, removed, moved, and changed\n\
-         \x20\x20\x20\x20files. Legacy journals and graph-enabled generations remain fail-closed. Each\n\
+         \x20\x20\x20\x20files. Graph-enabled journals absorb an added file that fits a frozen dataset,\n\
+         \x20\x20\x20\x20delete documents for a file that disappeared, and leave a file that needs a new\n\
+         \x20\x20\x20\x20dataset unindexed until --fresh rebuilds the plan. Each\n\
          \x20\x20\x20\x20changed generation currently copies and prepares the full corpus (O(N)); the\n\
          \x20\x20\x20\x20latest full snapshot remains retained, and cleanup re-reads protected artifacts\n\
          \x20\x20\x20\x20to verify them. --snapshot-max-gb limits logical staged payload bytes before each\n\
@@ -771,10 +792,16 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20two apart, and rerun the same command once the reported server\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20condition clears;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20or stale-resume-plan — files on disk appeared after the\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20resume plan was frozen. They are not counted as junk;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20`skipped_appeared` names them. Re-run with --fresh to\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20resume plan was frozen. They are not counted as junk.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20`skipped_appeared` is the count; the summary names the\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20first few paths and says to re-run with --fresh to\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20rebuild the plan in place and include them. Read `reason`\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20to tell this apart from completed-with-junk;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20or files-removed — a graph-path rerun deleted documents,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20catalog rows and edges for files that left the folder.\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20The index matches the folder; the next unchanged rerun is\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20exit 0. Read `reason` to tell this apart from\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20completed-with-junk;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x204 NEEDS A DECISION — the estimate exceeded --max-minutes, the\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20estimated index does not fit the disk budget, a reduced\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20plan would delete files that are already indexed, or a\n\
@@ -783,8 +810,11 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20that does not fit is not started, including with --yes.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Already-indexed files are not deleted unless --drop-indexed\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is also set;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 endpoint/journal failure, a refused corpus removal, or a\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20refused unsafe state transition\n",
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 endpoint/journal failure, a refused corpus removal, a\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20refused unsafe state transition, or pdf-worker-unavailable — every PDF\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20failed because the isolated parser could not start. Other files may\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20already be indexed. Read `reason` on the xerj-done line; the summary\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20on stdout opens with `not ok:`\n",
         feedback_block = xerj_common::feedback::block(feedback),
         default_poll = crate::objwatch::cost::DEFAULT_POLL_INTERVAL_SECS,
         default_budget = crate::objwatch::cost::DEFAULT_MAX_MONTHLY_CLASS_A,
@@ -1359,6 +1389,16 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
             xerj_common::feedback::DISABLE_FLAG => {}
             "--help" | "-h" => return Ok(Cmd::Help),
             "map" if sub.is_none() && folder.is_none() => sub = Some("map".into()),
+            // #2368: `autoindex map <folder>` previews that folder. The folder
+            // is the same positional the index command takes; it is accepted
+            // only after `map` so `xerj autoindex ./map` still indexes a
+            // directory of that name.
+            other
+                if !other.starts_with('-') && sub.as_deref() == Some("map") && folder.is_none() =>
+            {
+                root_raw = Some(other.to_string());
+                folder = Some(PathBuf::from(other));
+            }
             "status" if sub.is_none() && folder.is_none() => sub = Some("status".into()),
             "remove" if sub.is_none() && folder.is_none() => sub = Some("remove".into()),
             other if !other.starts_with('-') && folder.is_none() && sub.is_none() => {
@@ -1384,6 +1424,19 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                     "takes one folder per run, got two: `{first}` and `{other}`; index each \
                      folder in its own run with a distinct --prefix, e.g. `xerj autoindex \
                      {first} --prefix <name-a>` then `xerj autoindex {other} --prefix <name-b>`"
+                ));
+            }
+            other
+                if !other.starts_with('-') && sub.as_deref() == Some("map") && folder.is_some() =>
+            {
+                let first = folder
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
+                return Err(format!(
+                    "`autoindex map` takes at most one folder, got `{first}` and `{other}`. \
+                     `xerj autoindex map` with no folder prints the catalog of what is already \
+                     indexed. `xerj autoindex map <folder>` previews one folder and indexes nothing"
                 ));
             }
             other => return Err(format!("unknown argument: {other}")),
@@ -1425,13 +1478,11 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     // `--no-ignore` already removes the built-in defaults, so there is nothing
     // left for `--no-default-ignores` to do — say so instead of taking a flag
     // that changes nothing.
-    // Only meaningful for a run that walks a folder. On `map`/`status` neither
-    // flag does anything at all, and the arm below says so — a message about
-    // one flag subsuming the other would imply the pair is otherwise honoured.
-    let sub_walks_a_folder = !matches!(
-        sub.as_deref(),
-        Some("map") | Some("status") | Some("remove")
-    );
+    // Only meaningful for a run that walks a folder. A bare `map` (no folder),
+    // `status`, and `remove` never walk, and the arm below says so — a message
+    // about one flag subsuming the other would imply the pair is otherwise
+    // honoured. `map <folder>` does walk: it is the `--dry-run` preview.
+    let sub_walks_a_folder = folder.is_some();
     if no_ignore && no_default_ignores && sub_walks_a_folder {
         return Err(
             "--no-ignore already turns off the built-in default rules that --no-default-ignores \
@@ -1487,6 +1538,44 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     if walk_only {
         dry_run = true;
     }
+    // #2368: `autoindex map <folder>` previews an unindexed folder. It is the
+    // same discovery `--dry-run` runs (walk, hash, sniff, infer, print the
+    // plan) and it must not index. Forcing `dry_run` here arms every
+    // index-nothing guard. A bare `map` still reads the catalog.
+    let map_preview = sub.as_deref() == Some("map") && folder.is_some();
+    if map_preview {
+        if watch {
+            return Err(
+                "--watch reindexes a folder as it changes. `autoindex map <folder>` previews \
+                 that folder and indexes nothing. Drop --watch"
+                    .into(),
+            );
+        }
+        if label.is_some() {
+            return Err(
+                "--label labels documents at ingest. `autoindex map <folder>` previews that \
+                 folder and indexes nothing, so there is nowhere for the labels to go. Drop \
+                 --label"
+                    .into(),
+            );
+        }
+        if approve == Some(Approval::Cancel) {
+            return Err(
+                "`autoindex map <folder>` already indexes nothing, so --approve cancel has \
+                 nothing to cancel. Drop it"
+                    .into(),
+            );
+        }
+        if dataset.is_some() || detail_offset.is_some() || detail_limit.is_some() {
+            return Err(
+                "--dataset, --offset and --limit page the catalog that `autoindex map` reads \
+                 when no folder is given. `autoindex map <folder>` previews a folder and does \
+                 not read that catalog. Drop them, or run `xerj autoindex map` with no folder"
+                    .into(),
+            );
+        }
+        dry_run = true;
+    }
     if approve == Some(Approval::Cancel) && dry_run {
         return Err(
             "--approve cancel and --dry-run contradict each other: a dry run already indexes \
@@ -1534,16 +1623,14 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
         if !no_graph {
             return Err(
                 "--watch needs --no-graph today, and that is a real limitation rather than a \
-                 formality: reconciling an ADDED or DELETED file exists only on the --no-graph \
-                 (generated) route. On the default graph path a re-run resumes a frozen plan, \
-                 so a file created after that plan was frozen is reported as 'appeared after \
-                 the resume plan was frozen' and is NOT indexed until the corpus is rebuilt \
-                 with --fresh, and a file deleted from the folder ABORTS the run — and every \
-                 re-run after it — because its documents are still live in the destination. \
-                 (A file whose CONTENT changed is reconciled there; additions and deletions \
-                 are what a watcher on that route could not keep current.) Re-run as `xerj \
-                 autoindex <folder> --watch --no-graph` (relationship detection off), or keep \
-                 rebuilding a graph corpus with `xerj autoindex <folder> --fresh`"
+                 formality: the watcher re-runs the generated route, which reconciles added, \
+                 changed, renamed and deleted files against a committed generation, including \
+                 a file that would be a new dataset. The default graph path sweeps a deleted \
+                 file and indexes an added file that fits a frozen dataset, but a file that \
+                 needs a new dataset still stops with reason=stale-resume-plan until --fresh, \
+                 and this watcher is not built on that route. Re-run as `xerj autoindex \
+                 <folder> --watch --no-graph` (relationship detection off), or keep rebuilding \
+                 a graph corpus with `xerj autoindex <folder> --fresh`"
                     .into(),
             );
         }
@@ -1556,11 +1643,13 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
         );
     }
 
-    // `map` reads the catalog off the server and `status` reads the local
-    // journal; neither walks a filesystem, so an ignore flag on either cannot
-    // change one byte of the output. Measured before this check existed:
-    // `xerj autoindex map --no-ignore` was byte-identical to `xerj autoindex
-    // map`. Accepting it was the #204 accept-and-ignore class (#279).
+    // A bare `map` reads the catalog off the server and `status` reads the
+    // local journal; neither walks a filesystem, so an ignore flag on either
+    // cannot change one byte of the output. Measured before this check
+    // existed: `xerj autoindex map --no-ignore` was byte-identical to
+    // `xerj autoindex map`. Accepting it was the #204 accept-and-ignore class
+    // (#279). `map <folder>` is the exception: it walks, and the flag is
+    // honoured on that preview the same way `--dry-run` honours it.
     let ignore_flags_used: Vec<&str> = [
         ("--no-ignore", no_ignore),
         ("--no-default-ignores", no_default_ignores),
@@ -1819,6 +1908,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 json,
                 quiet,
                 xerj_url_note,
+                state_dir: state_dir.clone(),
             },
             prefix_explicit,
             approve_set: approve.is_some(),
@@ -1826,7 +1916,6 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
             reject: RemoveReject {
                 dry_run,
                 replace_prefix,
-                state_dir: state_dir.is_some(),
                 fresh,
                 workers: workers.is_some(),
                 pdf_workers: pdf_workers.is_some(),
@@ -1858,12 +1947,12 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 walk_only,
             },
         }),
-        (Some("map"), _) | (Some("status"), _) if walk_only => Err(format!(
+        (Some("map"), None) | (Some("status"), _) if walk_only => Err(format!(
             "--walk-only summarises a folder walk and does not apply to `autoindex {}`: that \
              subcommand never walks a tree. Drop it",
             sub.as_deref().unwrap_or_default()
         )),
-        (Some("map"), _) | (Some("status"), _)
+        (Some("map"), None) | (Some("status"), _)
             if max_minutes_explicit
                 || approve_explicit
                 || max_index_explicit
@@ -1876,11 +1965,11 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 sub.as_deref().unwrap_or_default()
             ))
         }
-        (Some("map"), _) | (Some("status"), _) if progress_explicit => Err(format!(
+        (Some("map"), None) | (Some("status"), _) if progress_explicit => Err(format!(
             "--progress/--progress-interval apply only to indexing, not `autoindex {}`",
             sub.as_deref().unwrap_or_default()
         )),
-        (Some("map"), _) | (Some("status"), _) if !ignore_flags_used.is_empty() => {
+        (Some("map"), None) | (Some("status"), _) if !ignore_flags_used.is_empty() => {
             let sub = sub.as_deref().unwrap_or_default();
             let (verb, them) = if ignore_flags_used.len() == 1 {
                 ("applies", "it")
@@ -1893,7 +1982,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 ignore_flags_used.join(" and "),
             ))
         }
-        (Some("map"), _) | (Some("status"), _) if endpoint_explicit => Err(format!(
+        (Some("map"), None) | (Some("status"), _) if endpoint_explicit => Err(format!(
             "--endpoint-url applies only to indexing, not `autoindex {}`: that subcommand reads the \
              XERJ node named by --url and never talks to an object store",
             sub.as_deref().unwrap_or_default()
@@ -1901,12 +1990,12 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
         (Some("map"), _) if bulk_timeout_explicit => {
             Err("--bulk-timeout-secs applies only to indexing, not `autoindex map`".into())
         }
-        (Some("map"), _) | (Some("status"), _) if label.is_some() => Err(format!(
+        (Some("map"), None) | (Some("status"), _) if label.is_some() => Err(format!(
             "--label labels indexed documents through /_decide; `autoindex {}` reads the node \
              and never indexes anything. Drop --label",
             sub.as_deref().unwrap_or_default()
         )),
-        (Some("map"), _) => Ok(Cmd::Map(MapCfg {
+        (Some("map"), None) => Ok(Cmd::Map(MapCfg {
             url,
             api_key,
             prefix: prefix_explicit.then_some(prefix),
@@ -1944,7 +2033,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
             state_dir,
             xerj_url_note,
         })),
-        (None, Some(root)) => {
+        (None, Some(root)) | (Some("map"), Some(root)) => {
             // A flag that is accepted and does nothing is the shape this repo
             // refuses on purpose (#204, #279): the operator believes they asked
             // for out-of-root targets and gets a run that silently did not.
@@ -2049,7 +2138,6 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
 struct RemoveReject {
     dry_run: bool,
     replace_prefix: bool,
-    state_dir: bool,
     fresh: bool,
     workers: bool,
     pdf_workers: bool,
@@ -2108,14 +2196,6 @@ fn remove_cmd(input: RemoveParse) -> Result<Cmd, String> {
         return Err(
             "--approve is the indexing decision gate. `autoindex remove` confirms with --yes, \
              after it has printed what it will delete."
-                .into(),
-        );
-    }
-    if reject.state_dir {
-        return Err(
-            "--state-dir is the local resume journal. `autoindex remove` does not read or delete \
-             it. The journal key includes the folder, so a later index of that folder still \
-             resumes from it. Drop --state-dir."
                 .into(),
         );
     }
@@ -2345,6 +2425,10 @@ mod tests {
             ),
             (vec!["map", "--label", "q.json"], "never indexes anything"),
             (
+                vec!["map", "knowledge", "--label", "q.json"],
+                "indexes nothing",
+            ),
+            (
                 vec!["status", "--label", "q.json"],
                 "never indexes anything",
             ),
@@ -2533,14 +2617,12 @@ mod tests {
         parse(args.iter().map(|s| s.to_string()).collect()).expect_err("must be refused")
     }
 
-    /// The `--watch` refusal must name the limitation it actually has. Measured
-    /// on the graph route against a 10,000-file corpus
-    /// (`docs/measurements/autoindex-watch-2026-09-19.md`, section 4): a re-run
-    /// after a file's CONTENT changed indexes it (3.07 s, `files=1`, searchable),
-    /// a re-run after an ADDITION skips the file with exit 3, and a re-run after a
-    /// DELETION aborts with exit 1 and keeps aborting. The message used to claim
-    /// the opposite about a changed file, which came from a measurement whose
-    /// shell append had created a new file rather than modifying one.
+    /// The `--watch` refusal must name the limitation it actually has.
+    /// The watcher is the generated route. On the default graph path a deleted
+    /// file is swept and an added file that fits a frozen dataset is indexed;
+    /// a file that needs a new dataset still waits for `--fresh`. The message
+    /// used to claim a content change was lost, which came from a measurement
+    /// whose shell append had created a new file rather than modifying one.
     #[test]
     fn the_watch_refusal_names_additions_and_deletions_not_content_changes() {
         let text = err(&["data", "--watch"]);
@@ -2549,12 +2631,16 @@ mod tests {
             "the message must name the flag that makes it work: {text}"
         );
         assert!(
-            text.contains("ADDED") && text.contains("DELETED"),
-            "the message must say which changes the graph route cannot reconcile: {text}"
+            text.contains("sweeps a deleted") && text.contains("fits a frozen dataset"),
+            "the message must say what the graph path does with a deletion and an addition: {text}"
         );
         assert!(
-            text.contains("CONTENT changed is reconciled"),
-            "the message must not leave the operator thinking an edit is lost too: {text}"
+            text.contains("stale-resume-plan"),
+            "a new dataset still waits for --fresh: {text}"
+        );
+        assert!(
+            !text.contains("ABORTS the run"),
+            "a deletion is swept, not aborted: {text}"
         );
         assert!(
             !text.contains("a file whose content changed is reported"),
@@ -2756,7 +2842,7 @@ mod tests {
         assert!(help.contains("ignore an existing resume journal and restart"));
         assert!(help.contains("durable corpus generation"));
         assert!(help.contains("drops the documents previously published for that path"));
-        assert!(help.contains("does not remove documents for a file that disappeared"));
+        assert!(help.contains("removes documents for a file that disappeared"));
     }
 
     #[test]
@@ -2766,7 +2852,7 @@ mod tests {
             "generated --no-graph journals",
             "add, change, delete, rename, and no-op",
             "written before the generation format must be rebuilt",
-            "graph-enabled journals keep the existing crash-resume behaviour",
+            "graph-enabled journals reconcile added files that fit a frozen",
         ] {
             assert!(help.contains(claim), "missing resume-policy claim: {claim}");
         }
@@ -2995,8 +3081,28 @@ mod tests {
         let walk = err(&["remove", "--prefix", "proj", "--walk-only"]);
         assert!(walk.contains("--walk-only"), "{walk}");
         assert!(walk.contains("not `autoindex remove`"), "{walk}");
-        let journal = err(&["remove", "--prefix", "proj", "--state-dir", "/tmp/j"]);
-        assert!(journal.contains("resume journal"), "{journal}");
+        let cfg = match parse(
+            [
+                "remove",
+                "--prefix",
+                "proj",
+                "--state-dir",
+                "/tmp/j",
+                "--yes",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        )
+        .unwrap()
+        {
+            Cmd::Remove(cfg) => cfg,
+            other => panic!("expected remove, got {other:?}"),
+        };
+        assert_eq!(
+            cfg.state_dir.as_deref(),
+            Some(std::path::Path::new("/tmp/j"))
+        );
         assert!(err(&["data", "--root", "/tmp/a"]).contains("only supported with"));
         assert!(err(&["remove", "--prefix", "proj", "--approve", "proceed"]).contains("--yes"));
         assert!(super::help_text().contains("autoindex remove"));
@@ -3107,9 +3213,9 @@ mod tests {
         }
     }
 
-    /// The graph route DOES reindex a modified file; what it cannot do is an
-    /// add or a delete. The help asserted the retracted version for as long as
-    /// the docs did, and pointed at a help section that does not exist.
+    /// The graph route sweeps a deletion and indexes an addition that fits a
+    /// frozen dataset. The help used to say a deletion aborts, and pointed at
+    /// a help section that does not exist.
     #[test]
     fn the_watch_help_does_not_repeat_the_retracted_graph_claim() {
         let help = super::help_text();
@@ -3117,7 +3223,11 @@ mod tests {
             !help.contains("only that route reindexes"),
             "the --watch help repeats the retracted claim about the graph route"
         );
-        for expected in ["refuses an ADDED file", "ABORTS on a deletion"] {
+        assert!(
+            !help.contains("ABORTS on a deletion"),
+            "the --watch help still says a deletion aborts"
+        );
+        for expected in ["sweeps a deleted", "files-removed", "stale-resume-plan"] {
             assert!(
                 help.contains(expected),
                 "--watch help is missing {expected:?}"
@@ -3835,5 +3945,124 @@ mod tests {
             Cmd::Map(cfg) => assert_eq!(cfg.prefix.as_deref(), Some("xc-tantivy")),
             other => panic!("expected a map config, got {other:?}"),
         }
+    }
+
+    /// #2368: `map` described itself as printing the discovered data map and
+    /// then rejected `map <folder>` as an unknown argument. The folder form
+    /// is the `--dry-run` preview. A bare `map` still reads the catalog.
+    #[test]
+    fn map_with_a_folder_is_the_dry_run_preview_and_bare_map_stays_the_catalog() {
+        let help = super::help_text();
+        assert!(
+            help.contains("xerj autoindex map <folder>"),
+            "help must show the folder form: {help}"
+        );
+        assert!(
+            help.contains("what is already indexed"),
+            "help must say a bare map reads indexed data: {help}"
+        );
+        assert!(
+            help.contains("`autoindex map <folder>` is this same preview"),
+            "help must point the preview at --dry-run: {help}"
+        );
+        assert!(
+            !help.contains("print the discovered data map"),
+            "the old usage line is what sent agents to pass a folder and get `unknown argument`"
+        );
+
+        match parse(["map"].iter().map(|s| s.to_string()).collect()).expect("bare map") {
+            Cmd::Map(cfg) => {
+                assert_eq!(cfg.prefix, None);
+                assert_eq!(cfg.dataset, None);
+            }
+            other => panic!("a bare map must stay a catalog read, got {other:?}"),
+        }
+
+        let preview = index(&["map", "knowledge"]);
+        let dry = index(&["knowledge", "--dry-run"]);
+        assert_eq!(
+            format!("{preview:?}"),
+            format!("{dry:?}"),
+            "map <folder> must be the same command as <folder> --dry-run"
+        );
+        assert_eq!(preview.root, PathBuf::from("knowledge"));
+        assert!(preview.dry_run);
+        assert!(!preview.walk_only);
+        assert!(preview.ignore.deep_count);
+
+        let flagged = index(&[
+            "map",
+            "--prefix",
+            "notes",
+            "--no-ignore",
+            "--no-semantic",
+            "--progress",
+            "plain",
+            "knowledge",
+        ]);
+        assert_eq!(flagged.root, PathBuf::from("knowledge"));
+        assert_eq!(flagged.prefix, "notes");
+        assert!(!flagged.ignore.enabled);
+        assert!(flagged.no_semantic);
+        assert_eq!(flagged.progress, ProgressMode::Plain);
+        assert!(flagged.dry_run);
+
+        let explicit = index(&["map", "knowledge", "--dry-run", "--prefix", "notes"]);
+        assert!(explicit.dry_run);
+        assert_eq!(explicit.prefix, "notes");
+        assert_eq!(explicit.root, PathBuf::from("knowledge"));
+
+        // A folder before `map` is still two positionals: `map` is only the
+        // subcommand when it comes first, so `xerj autoindex ./map` indexes
+        // a directory of that name.
+        let reversed = err(&["knowledge", "map"]);
+        assert!(reversed.contains("takes one folder per run"), "{reversed}");
+
+        let two = err(&["map", "knowledge", "other"]);
+        assert!(
+            two.contains("at most one folder")
+                && two.contains("knowledge")
+                && two.contains("other"),
+            "{two}"
+        );
+        assert!(!two.contains("unknown argument"), "{two}");
+
+        let dataset = err(&["map", "knowledge", "--dataset", "docs"]);
+        assert!(
+            dataset.contains("--dataset") && dataset.contains("no folder"),
+            "{dataset}"
+        );
+        let paging = err(&["map", "knowledge", "--limit", "2"]);
+        assert!(
+            paging.contains("--limit") && paging.contains("no folder"),
+            "{paging}"
+        );
+
+        // Catalog selectors still belong to the no-folder form.
+        match parse(
+            ["map", "--dataset", "docs"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        )
+        .expect("catalog map")
+        {
+            Cmd::Map(cfg) => assert_eq!(cfg.dataset.as_deref(), Some("docs")),
+            other => panic!("expected a catalog map, got {other:?}"),
+        }
+
+        // Flags that change the walk are honoured on the preview and still
+        // refused when there is no folder to walk.
+        assert!(err(&["map", "--no-ignore"]).contains("never walks a folder"));
+        assert!(err(&["map", "--max-minutes", "5"]).contains("apply only to indexing"));
+        assert!(err(&["map", "knowledge", "--bulk-timeout-secs", "900"]).contains("autoindex map"));
+        assert!(err(&["map", "knowledge", "--watch"]).contains("Drop --watch"));
+        assert!(err(&["map", "knowledge", "--approve", "cancel"]).contains("nothing to cancel"));
+
+        let both = err(&["map", "knowledge", "--no-ignore", "--no-default-ignores"]);
+        assert!(
+            both.contains("already turns off"),
+            "the preview walks, so the redundant ignore pair is the indexing error: {both}"
+        );
     }
 }

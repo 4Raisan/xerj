@@ -49,8 +49,10 @@
   "alternateName": "XERJ.ai",
   "url": "https://xerj.org/",
   "logo": "https://xerj.org/brandbook/xerj-mark.svg",
+  "description": "A new way for AI to search for data: one local Rust binary that indexes your code, docs, specs and logs, plus Corpus Hub packs, and returns cited answers.",
   "sameAs": [
-    "https://github.com/xerj-org/xerj"
+    "https://github.com/xerj-org/xerj",
+    "https://x.com/xerj_org"
   ]
 }
 </script>
@@ -77,10 +79,13 @@
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-22",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-24",
   "author": {
-    "@type": "Person",
-    "name": "XERJ documentation team"
+    "@type": "Organization",
+    "name": "XERJ documentation team",
+    "parentOrganization": {
+      "@id": "https://xerj.org/#organization"
+    }
   },
   "publisher": {
     "@id": "https://xerj.org/#organization"
@@ -93,9 +98,84 @@
     "@id": "https://xerj.org/answers/autoindex-exit-codes"
   },
   "reviewedBy": {
-    "@type": "Person",
-    "name": "XERJ engineering team"
+    "@type": "Organization",
+    "name": "XERJ engineering team",
+    "parentOrganization": {
+      "@id": "https://xerj.org/#organization"
+    }
   }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "What does indexer exit code 3 mean?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "It means the run completed and recorded junk. xerj autoindex --help states it as 3 completed-with-junk (junk recorded, never fatal) — SUCCESS and says to treat 0 and 3 alike as a finished run. Treat it as a success with a refusal list to read. Do not rerun it as a failure."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "The indexer exited 3 (or 4). Did it fail?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "3 did not fail. 4 did not fail either, and it did not index anything: it is a decision request waiting for --approve. Only 1 and 2 are failures."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why did folder indexing stop and ask me to approve?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The measured phase-A estimate for the indexing phase was longer than --max-minutes (default 10). With no --approve or --yes, nothing is indexed, a JSON decision request goes to stdout and the process exits 4."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I tell a failed index from a completed one with junk files?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Read the exit code, not the log volume. 0 and 3 are both finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the xerj-done line carries datasets_refused and files_refused. 1 is an endpoint or journal failure and nothing about it is a junk report."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is exit 1 the code for any error?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No, and that shorthand is wrong. --help scopes 1 to an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. A bad command line is 2. On the --no-graph path, an exit 1 whose terminal line reads reason=server-backpressure means the node rejected every write for the whole 600 s a bulk waits; the line carries ops_applied and ops_remaining."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does exit 0 always mean the folder was indexed?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Answering the decision gate with --approve cancel also exits 0, and that run indexes nothing on purpose. Read the terminal line or the journal before you report a corpus as searchable."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why did my run print no terminal line at all?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Either --quiet or --progress none was in force, which prints no terminal line, or the process was killed by a signal. A missing terminal line after the process is gone means it died, not that it finished."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which codes should an agent retry?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Retry nothing on 0 or 3. Re-run with --approve on 4. Fix the command line on 2. Investigate the endpoint and the journal on 1, because a blind retry repeats the same refusal. The one exit 1 to rerun unchanged is reason=server-backpressure, once the node accepts writes again: it resumes with the operations that remain."
+      }
+    }
+  ]
 }
 </script>
 <script type="application/ld+json">
@@ -128,23 +208,19 @@
 <body>
 <nav class="nav" aria-label="Primary">
   <a href="/" class="brand">XERJ</a>
-  <a href="/">HOME</a>
   <a href="/product">PRODUCT</a>
-  <span class="nav-drop">
-    <a href="/use-cases">USE CASES</a>
-  </span>
-  <a href="/case-studies">CASE STUDIES</a>
+  <a href="/use-cases">USE CASES</a>
+  <a href="/answers/" class="active">ANSWERS</a>
   <a href="/benchmarks/">BENCHMARKS</a>
+  <a href="/blog/">BLOG</a>
   <span class="spacer"></span>
   <a href="/for-agents">FOR AGENTS</a>
-  <a href="/docs/" class="active">DOCS</a>
-  <a href="/docs/recipes/">RECIPES</a>
+  <a href="/docs/">DOCS</a>
   <a href="/playground">DASHBOARDS</a>
   <a href="https://hub.xerj.org" rel="external">HUB</a>
   <a class="nav-stars" href="https://github.com/xerj-org/xerj" rel="external" title="XERJ on GitHub" aria-label="XERJ on GitHub, 14,225 stars"><svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg><span class="nav-stars-n" data-gh-stars="14225">★ 14.2k</span></a>
   <a href="https://x.com/xerj_org" rel="external" title="XERJ on X" style="display:inline-flex;align-items:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
   <a href="https://discord.com/invite/yetXFusXfs" rel="external" title="XERJ on Discord" style="display:inline-flex;align-items:center"><svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20.317 4.37a19.79 19.79 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.74 19.74 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.1 13.1 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.3 12.3 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.84 19.84 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg></a>
-  <span class="spacer"></span>
   <span class="theme">
     <button type="button" data-theme="day" class="active">DAY</button>
     <span class="dash">·</span>
@@ -156,9 +232,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>THE INDEXER EXITED 3 (OR 4). DID IT FAIL?</div>
   <div class="kicker"><span>ANSWERS · OPERATIONS: EXIT CODES</span></div>
   <h1>The indexer exited 3 (or 4). Did it fail?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-24</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-24</span>
     <p>What does indexer exit code 3 mean for xerj autoindex? It means success: the run completed and recorded some junk files. Exit 0 is a clean completion, 4 means the estimate exceeded --max-minutes and nothing was indexed, 2 is a usage error, and 1 is an endpoint or journal failure. Only exit 4 asks you a question.</p>
     <p class="key-fact"><strong>Key number:</strong> The decision gate that produces exit 4 defaults to 10 minutes of estimated work (<code class="inline">DEFAULT_MAX_MINUTES</code>). <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/gate.rs">engine/crates/xerj-autoindex/src/gate.rs</a>)</span></p>
   </div>
@@ -204,7 +280,7 @@
     <thead><tr><th>Exit</th><th>Name in <code class="inline">--help</code></th><th>What it means for the corpus</th></tr></thead>
     <tbody>
       <tr><td>0</td><td>complete</td><td>The run finished and refused nothing. A gate answered with <code class="inline">--approve cancel</code> also exits 0.</td></tr>
-      <tr><td>3</td><td>completed-with-junk</td><td>The run finished. At least one file was refused and recorded. Never fatal. This includes a whole dataset whose mapping the server refused.</td></tr>
+      <tr><td>3</td><td>completed-with-junk</td><td>SUCCESS. The run finished. At least one file was refused and recorded. Treat it the same as exit 0: the index is searchable. This includes a whole dataset whose mapping the server refused.</td></tr>
       <tr><td>4</td><td>NEEDS A DECISION</td><td>The estimate exceeded <code class="inline">--max-minutes</code>. Nothing was indexed. A JSON decision request is on stdout.</td></tr>
       <tr><td>2</td><td>usage</td><td>The command line was wrong. Nothing ran.</td></tr>
       <tr><td>1</td><td>endpoint/journal failure</td><td>The node or the resume journal failed, a corpus removal was refused, or an unsafe state transition was refused.</td></tr>
@@ -212,7 +288,7 @@
   </table>
   <p>Read the table in that order rather than in numeric order. It is the order the help text uses, and it is the order of decreasing goodness.</p>
   <h2>Exit 3 is a finished run</h2>
-  <p><code class="inline">3 completed-with-junk (junk recorded, never fatal)</code> is the phrase in the help text, and <code class="inline">never fatal</code> is doing the work in that sentence.</p>
+  <p><code class="inline">3 completed-with-junk (junk recorded, never fatal) — SUCCESS</code> is the phrase in the help text, and it says to treat 0 and 3 alike as a finished run. Exit 3 is success. Do not rerun it as a failure.</p>
   <p>A folder of real files almost always contains something XERJ will not parse. An unknown binary, an image, a file above <code class="inline">--max-file-gb</code>. Those files are recorded in the catalog with a reason, and the rest of the folder is indexed and queryable.</p>
   <p>An agent that treats a non-zero exit as a failure will therefore throw away a perfectly good index. Branch on the specific value.</p>
   <p>The companion check is the refusal list, not the exit code: read <code class="inline">autoindex-catalog</code> and match each refused path to its reason. The <a href="/answers/why-autoindex-skipped-files">skipped-files page</a> covers that query.</p>
@@ -223,7 +299,8 @@
 </code></pre>
   <p>So an exit 3 is still a finished run, but it is not always a small gap. Read <code class="inline">datasets_refused</code> before you report a corpus as searchable. The <a href="/answers/autoindex-dataset-refused-by-server">refused-dataset page</a> covers what is recorded and how to recover.</p>
   <p>Only a 400 is a refusal. A 401, 403, 404, 408, 429 or 5xx on the same request says nothing about that dataset, so it still exits 1.</p>
-  <p>A 429 <em>on a bulk</em> is different, whether it is the whole request or some of its items marked <code class="inline">status: 429</code>. When the node's memory circuit breaker answers that way, the run re-sends the rejected items after a backoff and carries on; it exits 1 only after 600 seconds of re-sends the node never takes, with an error line that begins <code class="inline">the server kept rejecting</code>. The terminal line of a run that met back-pressure and finished carries <code class="inline">bulk_retries=N</code>. The <a href="/answers/autoindex-server-back-pressure-429">back-pressure page</a> covers it.</p>
+  <p>A 429 <em>on a bulk</em> is different, whether it is the whole request or some of its items marked <code class="inline">status: 429</code>. When the node's memory circuit breaker answers that way, the run re-sends the rejected items after a backoff and carries on. It exits 1 only after 600 seconds of re-sends the node never takes.</p>
+  <p>The error line begins <code class="inline">the server kept rejecting</code>. The terminal line of a run that met back-pressure and finished carries <code class="inline">bulk_retries=N</code>. The <a href="/answers/autoindex-server-back-pressure-429">back-pressure page</a> covers it.</p>
   <h2>Exit 4 is a question, and nothing was written</h2>
   <p>Phase A reads and parses every file to sniff and sample it, so it measures throughput per format family on the machine you are on. It turns that into a range for the indexing phase, and the gate compares the upper end of the range against <code class="inline">--max-minutes</code> (default 10).</p>
   <p>If the upper end is longer and no <code class="inline">--approve</code> or <code class="inline">--yes</code> was given, <strong>nothing is indexed</strong>. A JSON decision request goes to stdout and the process exits 4.</p>
@@ -245,10 +322,10 @@ xerj-done ok=false exit=1 reason=server-backpressure wall=… ops_applied=N ops_
   <pre class="code"><code class="language-text">xerj-done ok=false exit=1 reason=aborted wall=10336.0s
 error: prepared bulk contained 1 rejected items: {"type":"engine_exception","reason":"bulk request contains 102258 lines (~51129 actions); exceeds max_actions_per_bulk of 50000","status":413}
 </code></pre>
-  <p>Every <code class="inline">_bulk</code> body now goes out in windows of at most 10,000 actions. A request the node still refuses for its size is cut in two and sent again, and the terminal line carries <code class="inline">bulk_splits=N</code> when that happened. Against real nodes with <code class="inline">max_actions_per_bulk = 64</code> and with <code class="inline">max_body_bytes = 98304</code>, each run ended <code class="inline">ok=true exit=3 records=1663 bulk_splits=1</code>, the same records as a control run. Resuming that same generation with the change committed it:</p>
+  <p>Every <code class="inline">_bulk</code> body now goes out in windows of at most 10,000 actions. A request the node still refuses for its size is cut in two and sent again, and the terminal line carries <code class="inline">bulk_splits=N</code> when that happened. Against real nodes with <code class="inline">max_actions_per_bulk = 64</code> and with <code class="inline">max_body_bytes = 98304</code>, each run ended <code class="inline">ok=true exit=3 records=1663 bulk_splits=1</code>, the same documents as a control run. Resuming that same generation with the change committed it:</p>
   <pre class="code"><code class="language-text">xerj-done ok=true exit=3 reason=completed-with-junk wall=415.0s files=47444 records=821840 generation=1 code_files=34324 code_files_indexed=34324 code_files_junked=0
 </code></pre>
-  <p>One record that is larger than the node's <code class="inline">limits.max_body_bytes</code> cannot be cut, and it still ends the run with exit 1 and an error that names that setting.</p>
+  <p>One document that is larger than the node's <code class="inline">limits.max_body_bytes</code> cannot be cut, and it still ends the run with exit 1 and an error that names that setting.</p>
   <h2>Do not read the code alone</h2>
   <p>Every run that reaches an exit, success or error, ends with one terminal line in every progress mode except <code class="inline">none</code>.</p>
   <pre class="code"><code class="language-text">xerj-done ok=true exit=3 reason=completed-with-junk wall=0.6s files=4 records=1 generation=1
@@ -269,10 +346,12 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
   <p>Pair this with the four-number reconciliation on the <a href="/answers/check-codebase-index-is-complete">completeness page</a>. The exit code tells you how the process ended; only the counts tell you what is in the index.</p>
   <h2>How this page was checked</h2>
   <p>The codes above were read from <code class="inline">xerj autoindex --help</code> on a built binary and cross-checked against the help string in <code class="inline">engine/crates/xerj-autoindex/src/cli.rs</code>. Both agree.</p>
-  <p>One code was forced for this page: the exit 3 of a refused dataset, on a throwaway node, by pre-creating the dataset's index with a conflicting field type. That capture is committed under <code class="inline">benchmarks/autoindex-resilience/</code>, together with the full-corpus exit 1 in <code class="inline">finalize-catalog</code>, the exit 3 of the same generation resumed after issue #955 was fixed (<code class="inline">before-955.stderr.txt</code>, <code class="inline">after-955.full-corpus-resume.stderr.txt</code>), and a <code class="inline">reason=server-backpressure</code> exit 1 forced with a 64 MiB memory cap (<code class="inline">limits-real-node.txt</code>). The other codes were not forced, so there is no capture for them here and no timing. If you want the codes on your own build, <code class="inline">xerj autoindex --help</code> prints them in one screen.</p>
+  <p>One code was forced for this page. It is the exit 3 of a refused dataset, on a throwaway node, by pre-creating the dataset's index with a conflicting field type. That capture is committed under <code class="inline">benchmarks/autoindex-resilience/</code>.</p>
+  <p>The folder also holds the full-corpus exit 1 in <code class="inline">finalize-catalog</code>. It holds the exit 3 of the same generation resumed after issue #955 was fixed (<code class="inline">before-955.stderr.txt</code>, <code class="inline">after-955.full-corpus-resume.stderr.txt</code>). It holds a <code class="inline">reason=server-backpressure</code> exit 1 forced with a 64 MiB memory cap (<code class="inline">limits-real-node.txt</code>).</p>
+  <p>The other codes were not forced, so there is no capture for them here and no timing. If you want the codes on your own build, <code class="inline">xerj autoindex --help</code> prints them in one screen.</p>
   <h2>FAQ</h2>
   <h3>What does indexer exit code 3 mean?</h3>
-  <p>It means the run completed and recorded junk. <code class="inline">xerj autoindex --help</code> states it as <code class="inline">3 completed-with-junk (junk recorded, never fatal)</code>. Treat it as a success with a refusal list to read.</p>
+  <p>It means the run completed and recorded junk. <code class="inline">xerj autoindex --help</code> states it as <code class="inline">3 completed-with-junk (junk recorded, never fatal) — SUCCESS</code> and says to treat 0 and 3 alike as a finished run. Treat it as a success with a refusal list to read. Do not rerun it as a failure.</p>
   <h3>The indexer exited 3 (or 4). Did it fail?</h3>
   <p>3 did not fail. 4 did not fail either, and it did not index anything: it is a decision request waiting for <code class="inline">--approve</code>. Only 1 and 2 are failures.</p>
   <h3>Why did folder indexing stop and ask me to approve?</h3>
@@ -289,8 +368,8 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
   <p>Retry nothing on 0 or 3. Re-run with <code class="inline">--approve</code> on 4. Fix the command line on 2. Investigate the endpoint and the journal on 1, because a blind retry repeats the same refusal. The one exit 1 to rerun unchanged is <code class="inline">reason=server-backpressure</code>, once the node accepts writes again: it resumes with the operations that remain.</p>
   <h2>Evidence</h2>
   <ul>
-    <li>EXIT CODES: 0 complete (also: gate answered with --approve cancel); 3 completed-with-junk (junk recorded, never fatal) - this includes a dataset whose mapping the server REFUSED: its files are recorded as junk with the server's reason, the xerj-done line carries datasets_refused / files_refused, and every other dataset is indexed; 4 NEEDS A DECISION - the estimate exceeded --max-minutes and nothing was indexed, a JSON decision request is on stdout; 2 usage; 1 endpoint/journal failure, a refused corpus removal, or a refused unsafe state transition. — <code>engine/crates/xerj-autoindex/src/cli.rs:395</code></li>
-    <li>Exit 4 is a code of its own; 1 is the catch-all for real failures, and the decision request is answered by re-running the same command with --approve proceed, fast or cancel. — <code>engine/crates/xerj-autoindex/src/cli.rs:395</code></li>
+    <li>EXIT CODES: 0 complete (also: gate answered with --approve cancel); 3 completed-with-junk (junk recorded, never fatal) — SUCCESS: the index is searchable, and the summary on stdout opens with a line starting <code class="inline">ok:</code> that says so (xerj-done carries ok=true). Treat 0 and 3 alike as a finished run. This includes a dataset whose mapping the server REFUSED: its files are recorded as junk with the server's reason, the xerj-done line carries datasets_refused / files_refused, and every other dataset is indexed; 4 NEEDS A DECISION — the estimate exceeded --max-minutes and nothing was indexed, a JSON decision request is on stdout; 2 usage; 1 endpoint/journal failure, a refused corpus removal, or a refused unsafe state transition. — <code>engine/crates/xerj-autoindex/src/cli.rs:771</code></li>
+    <li>Exit 4 is a code of its own; 1 is the catch-all for real failures, and the decision request is answered by re-running the same command with --approve proceed, fast or cancel. — <code>engine/crates/xerj-autoindex/src/cli.rs:771</code></li>
     <li>A forced mapping refusal ended xerj-done ok=true exit=3 reason=completed-with-junk wall=0.7s files=1 records=1 generation=1 datasets_refused=1 files_refused=2, with the other dataset indexed. — <code>benchmarks/autoindex-resilience/refusal-e2e.run1.stderr.txt</code></li>
     <li>Before issue #955 was fixed, a 48,533-file --no-graph run applied every operation and then ended xerj-done ok=false exit=1 reason=aborted wall=10336.0s, because the catalog went out as one bulk request of 51,129 actions and the engine's max_actions_per_bulk is 50,000. — <code>benchmarks/autoindex-resilience/before-955.stderr.txt</code></li>
     <li>Resuming that same generation with the fix ended xerj-done ok=true exit=3 reason=completed-with-junk wall=415.0s files=47444 records=821840 generation=1. — <code>benchmarks/autoindex-resilience/after-955.full-corpus-resume.stderr.txt</code></li>
@@ -445,17 +524,24 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
     <a href="/aise-demo">PRODUCT TOUR</a>
   </div>
   <div class="fm-col">
-    <span class="fm-h">SOLUTIONS</span>
-    <a href="/solutions/">SOLUTIONS</a>
+    <span class="fm-h">LEARN</span>
+    <a href="/answers/">ANSWERS</a>
+    <a href="/compare/">COMPARE</a>
     <a href="/use-cases">USE CASES</a>
     <a href="/case-studies">CASE STUDIES</a>
     <a href="/industries/">INDUSTRIES</a>
+    <a href="/blog/">BLOG</a>
+  </div>
+  <div class="fm-col">
+    <span class="fm-h">SOLUTIONS</span>
+    <a href="/solutions/">SOLUTIONS</a>
     <a href="/industries/finserv">FINANCIAL SERVICES</a>
     <a href="/industries/public-sector">PUBLIC SECTOR</a>
     <a href="/industries/healthcare">HEALTHCARE</a>
     <a href="/industries/retail">RETAIL</a>
     <a href="/use-cases/code-security-audit">AI CODE-SECURITY AUDIT</a>
     <a href="/use-cases/semantic-analytics">SEMANTIC ANALYTICS</a>
+    <a href="/resources/">SALES KIT</a>
   </div>
   <div class="fm-col">
     <span class="fm-h">DOCS</span>
@@ -467,15 +553,6 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
     <a href="/docs/agents/">DOCS FOR AI</a>
     <a href="/for-agents">FOR AI AGENTS</a>
     <a href="/agent-search/">AGENTIC SEARCH DEMO</a>
-    <a href="/answers/">ANSWERS</a>
-    <a href="/compare/">COMPARISONS</a>
-  </div>
-  <div class="fm-col">
-    <span class="fm-h">RESOURCES</span>
-    <a href="/resources/">SALES KIT</a>
-    <a href="/blog/">BLOG</a>
-    <a href="/brand">BRAND</a>
-    <a href="/brandbook/">BRAND BOOK</a>
     <a href="/llms.txt">LLMS.TXT</a>
     <a href="https://github.com/xerj-org/xerj" rel="external">GITHUB</a>
   </div>
@@ -484,7 +561,7 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
 <footer class="footer">
   <span>XERJ.AI · ANSWERS</span>
   <span>READ THE SOURCE</span>
-  <span><a href="/">HOME</a> · <a href="/product">PRODUCT</a> · <a href="/brand">BRAND</a> · <a href="/playground">DASHBOARDS</a> &middot; <a href="/llms.txt">LLMS.TXT</a></span>
+  <span><a href="/">HOME</a> · <a href="/product">PRODUCT</a> · <a href="/answers/">ANSWERS</a> · <a href="/playground">DASHBOARDS</a> &middot; <a href="/llms.txt">LLMS.TXT</a></span>
 </footer>
 <script src="/interact.js"></script>
 </body>
