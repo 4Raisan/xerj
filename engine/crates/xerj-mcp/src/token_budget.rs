@@ -60,6 +60,18 @@ pub const TOKENIZER_ID: &str = "standard-uax29-words";
 /// budget it cannot honor.
 pub const MIN_MAX_TOKENS: usize = 32;
 
+/// Budget applied when the caller passes no `max_tokens` (#2491).
+///
+/// Without a default the response was unbounded, and an agent whose host caps
+/// tool output had the result spilled to a temp file instead of shown inline —
+/// it then spent extra steps reading the file back, which is exactly the cost
+/// the budget exists to avoid. ~8000 word tokens is roughly 45 KB of text:
+/// far more than any useful search response (a typical 10-hit page is a few
+/// hundred), and comfortably inside the tool-output limits MCP hosts impose.
+/// A caller that wants more says so — any value above [`MIN_MAX_TOKENS`] is
+/// accepted — so this bounds the default, not the ceiling.
+pub const DEFAULT_MAX_TOKENS: usize = 8_000;
+
 /// Tokens reserved for the `_token_budget` accounting block before any hit is
 /// admitted. The block's fixed fields (keys + counts) measure ~14 word tokens;
 /// locator stubs inside it are charged against the content budget separately,
@@ -81,9 +93,15 @@ const TRUNCATION_MARKER: &str = "\n[truncated at the max_tokens budget]";
 /// floor is an error, never a silent drop — the `opt_typed` policy: an agent
 /// that asked for a budget and silently got none would trust a response whose
 /// size it cannot predict.
+///
+/// Absent means [`DEFAULT_MAX_TOKENS`], not unbounded (#2491): a response that
+/// overflows the host's tool-output limit is one the agent cannot read inline,
+/// so "no budget asked for" must not degrade into "no budget applied". The
+/// return is still an `Option` because a caller may want to skip budgeting
+/// entirely for a response it already knows is short.
 pub fn opt_max_tokens(args: &Value) -> Result<Option<usize>, String> {
     match args.get("max_tokens") {
-        None | Some(Value::Null) => Ok(None),
+        None | Some(Value::Null) => Ok(Some(DEFAULT_MAX_TOKENS)),
         Some(v) => match v.as_u64() {
             Some(n) if n as usize >= MIN_MAX_TOKENS => Ok(Some(n as usize)),
             _ => Err(format!(
@@ -623,8 +641,15 @@ mod tests {
 
     #[test]
     fn opt_max_tokens_validates() {
-        assert_eq!(opt_max_tokens(&json!({})), Ok(None));
-        assert_eq!(opt_max_tokens(&json!({ "max_tokens": null })), Ok(None));
+        assert_eq!(
+            opt_max_tokens(&json!({})),
+            Ok(Some(DEFAULT_MAX_TOKENS)),
+            "an omitted budget must fall back to the default, not to unbounded"
+        );
+        assert_eq!(
+            opt_max_tokens(&json!({ "max_tokens": null })),
+            Ok(Some(DEFAULT_MAX_TOKENS))
+        );
         assert_eq!(opt_max_tokens(&json!({ "max_tokens": 500 })), Ok(Some(500)));
         for bad in [
             json!({ "max_tokens": 0 }),
@@ -637,6 +662,45 @@ mod tests {
             let msg = opt_max_tokens(&bad).unwrap_err();
             assert!(msg.contains(">= 32"), "the floor must be named: {msg}");
         }
+    }
+
+    /// #2491: a search that passes no `max_tokens` used to return whatever the
+    /// engine produced, and a response past the host's tool-output limit was
+    /// spilled to a temp file instead of shown to the agent. Absent now means
+    /// `DEFAULT_MAX_TOKENS`, so the same call is bounded and still readable.
+    #[test]
+    fn an_unbudgeted_search_response_is_bounded_by_default() {
+        // Wide enough that an unbounded response overruns any plausible host
+        // limit: 400 hits carrying 400 lines of body each.
+        let resp = search_response(
+            (1..=400)
+                .map(|i| code_hit(&format!("repo/src/module_{i}.rs"), 10 * i, 400))
+                .collect(),
+        );
+        let unbounded = count_tokens(&resp);
+        assert!(
+            unbounded > DEFAULT_MAX_TOKENS,
+            "the fixture must be big enough to need the default cap: {unbounded}"
+        );
+
+        let budget = opt_max_tokens(&json!({}))
+            .expect("absent max_tokens is not an error")
+            .expect("absent max_tokens must apply the default budget");
+        assert_eq!(budget, DEFAULT_MAX_TOKENS);
+
+        let out = budget_json_response(&resp, budget);
+        let used = count_tokens(&out);
+        assert!(
+            used <= DEFAULT_MAX_TOKENS,
+            "default budget {DEFAULT_MAX_TOKENS} exceeded: {used}\n---\n{out}\n---"
+        );
+        // Bounded by dropping content, not by dropping the answer: the
+        // accounting block has to say what went, or the agent cannot tell a
+        // short corpus from a truncated one.
+        assert!(
+            out.contains("_token_budget"),
+            "the response must account for what the budget cut:\n{out}"
+        );
     }
 
     // ── JSON surface: per-tool budget enforcement ──────────────────────────

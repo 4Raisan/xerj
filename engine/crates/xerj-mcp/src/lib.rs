@@ -93,13 +93,16 @@
 //! Diagnostics go to **stderr**; stdout is reserved exclusively for the
 //! JSON-RPC stream.
 //!
-//! ## Token budgets (#1058)
+//! ## Token budgets (#1058, default since #2491)
 //!
 //! The six search tools accept `max_tokens` and are held to it: the response
 //! text NEVER exceeds the budget. Enforcement lives in [`token_budget`],
 //! counted with one named tokenizer (XERJ's `StandardTokenizer`, UAX #29
 //! words), with duplicate passages removed before budgeting and
-//! over-budget hits reduced to locators.
+//! over-budget hits reduced to locators. Omitting `max_tokens` applies
+//! [`token_budget::DEFAULT_MAX_TOKENS`] rather than leaving the response
+//! unbounded, so a result too large for the host's tool-output limit is
+//! trimmed with an accounting block instead of being spilled to a file.
 
 mod batch;
 mod batch_cli;
@@ -877,9 +880,12 @@ fn max_tokens_arg_schema() -> Value {
              listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the \
              response's `_token_budget` block accounts for every hit: kept, locator-only, \
              deduped, dropped. Errors are never truncated — a refusal you cannot read \
-             end-to-end is worse than a long response. Minimum {}.",
+             end-to-end is worse than a long response. Minimum {}; when omitted the budget is \
+             {} (about 45 KB), so a response stays inside a host's tool-output limit unless you \
+             ask for more.",
             token_budget::TOKENIZER_NAME,
             token_budget::MIN_MAX_TOKENS,
+            token_budget::DEFAULT_MAX_TOKENS,
         )
     })
 }
