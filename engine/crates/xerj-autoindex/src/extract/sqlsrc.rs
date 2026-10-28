@@ -315,7 +315,10 @@ fn trim_sql_noise(s: &str) -> &str {
 
 fn starts_with_kw(s: &str, kw: &str) -> bool {
     let s = trim_sql_noise(s);
-    if s.len() < kw.len() || !s[..kw.len()].eq_ignore_ascii_case(kw) {
+    let Some(prefix) = s.get(..kw.len()) else {
+        return false;
+    };
+    if !prefix.eq_ignore_ascii_case(kw) {
         return false;
     }
     s.as_bytes()
@@ -348,18 +351,18 @@ impl<'a> Words<'a> {
     fn eat(&mut self, kw: &str) -> bool {
         self.skip_ws();
         let rest = &self.s[self.i..];
-        if rest.len() >= kw.len()
-            && rest[..kw.len()].eq_ignore_ascii_case(kw)
-            && rest
-                .as_bytes()
-                .get(kw.len())
-                .is_none_or(|b| !is_ident_byte(*b))
-        {
-            self.i += kw.len();
-            true
-        } else {
-            false
+        if let Some(prefix) = rest.get(..kw.len()) {
+            if prefix.eq_ignore_ascii_case(kw)
+                && rest
+                    .as_bytes()
+                    .get(kw.len())
+                    .is_none_or(|b| !is_ident_byte(*b))
+            {
+                self.i += kw.len();
+                return true;
+            }
         }
+        false
     }
 
     fn rest(&mut self) -> &'a str {
@@ -747,5 +750,16 @@ mod tests {
             "{defs} family {:?}",
             sn.family
         );
+    }
+
+    #[test]
+    fn cjk_comment_head_does_not_panic_or_hang() {
+        let sql = "-- 中文字段整改：演示复现\nALTER TABLE t ADD COLUMN c VARCHAR(64);\n";
+        let dir = tempfile::tempdir().unwrap();
+        let path = write(dir.path(), "cjk.sql", sql);
+        let (stats, recs) = indexed(&path);
+        assert!(stats.records > 0, "CJK comment file must be indexed safely");
+        assert!(!recs.is_empty(), "records must not be empty");
+        assert!(stats.refusal.is_none(), "{stats:?}");
     }
 }
