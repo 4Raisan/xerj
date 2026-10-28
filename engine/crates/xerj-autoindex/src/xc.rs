@@ -486,6 +486,20 @@ pub(crate) fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
     ))
 }
 
+/// Whether an existing directory can be reused as a clone of its remote.
+///
+/// `.git` appears before the first object lands, so its presence says nothing
+/// about whether the clone finished: a killed `git clone` leaves a repository
+/// with no HEAD and no files. HEAD names a commit only once the fetch and the
+/// checkout got that far (#2453).
+fn existing_checkout_is_complete(target: &Path) -> bool {
+    if !target.join(".git").exists() {
+        return false;
+    }
+    git(Some(target), &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .is_ok_and(|(rc, out)| rc == 0 && !out.is_empty())
+}
+
 /// How much of git's own stdout/stderr a fetch failure keeps. A TLS
 /// intercept or a rejected pin is a paragraph; the rest of the bail stays
 /// one line an agent can read.
@@ -1266,7 +1280,7 @@ fn run_corpus_add(args: &[String]) -> i32 {
             );
             continue;
         }
-        if target.join(".git").exists() {
+        if existing_checkout_is_complete(&target) {
             println!("  [skip] {repo_name} already cloned");
             carry_ignore(&target);
             record(
@@ -1280,6 +1294,17 @@ fn run_corpus_add(args: &[String]) -> i32 {
                 own,
             );
             continue;
+        }
+        // #2453: a killed clone leaves `.git` behind with no HEAD, so the
+        // directory looked cloned forever and `corpus add` skipped it. The
+        // check above says the wreck is not reusable; clear it and clone.
+        if target.join(".git").exists() {
+            println!("  [redo] {repo_name}: clearing an incomplete clone and re-cloning");
+            if let Err(e) = std::fs::remove_dir_all(&target) {
+                eprintln!("  [FAIL] {repo_name}: cannot clear the incomplete clone: {e}");
+                skipped.push(repo_name);
+                continue;
+            }
         }
         println!("  [clone] {repo_name}");
         if sha.is_empty() {
@@ -3394,6 +3419,47 @@ pub fn licence_map_for(root: &Path, corpus: &str) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2453: a clone killed partway leaves `.git` behind with no HEAD, so
+    /// `corpus add` skipped the empty directory as "already cloned" forever.
+    #[test]
+    fn an_interrupted_clone_is_not_a_reusable_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("repo");
+        std::fs::create_dir_all(target.join(".git")).unwrap();
+        assert!(!existing_checkout_is_complete(&target));
+    }
+
+    #[test]
+    fn a_missing_checkout_is_not_a_reusable_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!existing_checkout_is_complete(&dir.path().join("repo")));
+    }
+
+    #[test]
+    fn a_finished_clone_is_a_reusable_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("repo");
+        std::fs::create_dir_all(&target).unwrap();
+        let run = |args: &[&str]| {
+            let (rc, out) = git(Some(&target), args).unwrap();
+            assert_eq!(rc, 0, "git {args:?} failed: {out}");
+        };
+        run(&["init", "--quiet"]);
+        std::fs::write(target.join("README.md"), "hello\n").unwrap();
+        run(&["add", "README.md"]);
+        run(&[
+            "-c",
+            "user.name=xerj-test",
+            "-c",
+            "user.email=xerj-test@example.com",
+            "commit",
+            "--quiet",
+            "-m",
+            "init",
+        ]);
+        assert!(existing_checkout_is_complete(&target));
+    }
 
     #[test]
     fn git_fetch_failure_names_tls_and_a_stale_pin() {
