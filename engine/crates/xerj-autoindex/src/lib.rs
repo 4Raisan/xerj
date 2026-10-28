@@ -52,6 +52,7 @@ pub mod search;
 pub mod sessions;
 pub mod sniff;
 pub mod source;
+mod stage;
 pub mod staleness;
 pub mod state;
 mod sync;
@@ -64,7 +65,7 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::io::{BufRead, BufReader, Seek, Write};
+use std::io::{BufRead, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -10871,10 +10872,7 @@ fn run_index_report_inner(
             // only source that can name a PDF page boundary's
             // predecessor (p2-s0 follows the LAST section of page 1).
             let mut prev_section: Option<(String, String)> = None;
-            let mut staged = match tempfile::Builder::new()
-                .prefix(".autoindex-stage-")
-                .tempfile_in(&state_dir)
-            {
+            let mut staged = match stage::Stage::create_in(&state_dir) {
                 Ok(file) => file,
                 Err(error) => {
                     let mut errors = bulk_errors.lock().unwrap();
@@ -10939,12 +10937,9 @@ fn run_index_report_inner(
                         align_hit_locators(&mut fields, &f.rel);
                         let action = json!({"index": {
                                     "_index": rt.index, "_id": cf.anchor_doc_id}});
-                        if let Err(error) = writeln!(
-                            staged.as_file_mut(),
-                            "{}\n{}",
-                            action,
-                            Value::Object(fields)
-                        ) {
+                        if let Err(error) =
+                            writeln!(&mut staged, "{}\n{}", action, Value::Object(fields))
+                        {
                             send_err = Some(format!("stage file card for {}: {error}", f.rel));
                         }
                     }
@@ -11038,7 +11033,7 @@ fn run_index_report_inner(
                     let action = json!({"index": {"_index": rt.index, "_id": id}});
                     let doc = Value::Object(fields);
                     if let Err(error) = writeln!(
-                        staged.as_file_mut(),
+                        &mut staged,
                         "{}\n{}",
                         action,
                         serde_json::to_string(&doc).unwrap_or_else(|_| "{}".into())
@@ -11278,9 +11273,28 @@ fn run_index_report_inner(
                     continue;
                 }
             }
+            // Finish buffered compression before the first remote mutation.
+            // ENOSPC can surface here even when every earlier write succeeded;
+            // keep the previous records live and the replacement pending then.
+            // Reference: tantivy 3a55bc98, src/directory/mmap_directory/mod.rs:
+            // 372-376 flushes the temporary writer before publishing its file.
+            // The stage is consumed here whether or not the send runs: an
+            // early error drops it, and the unnamed file goes with it.
+            let staged_len = staged.raw_bytes();
+            let mut reader = None;
+            if send_err.is_none() {
+                match staged.into_reader() {
+                    Ok((r, _disk)) => reader = Some(r),
+                    Err(error) => {
+                        send_err = Some(format!("finish staged records for {}: {error}", f.rel));
+                    }
+                }
+            } else {
+                drop(staged);
+            }
             // Visibility begins only after extraction and the second
-            // full-content verification. Delete-before-replace makes
-            // a retry clean up any partial prior attempt.
+            // full-content verification and stage finalization.
+            // Delete-before-replace makes a retry clean up any partial prior attempt.
             if send_err.is_none() && cleanup_required.contains(key) {
                 let prior = superseded.get(&f.rel);
                 let mut indices: Vec<String> = fa
@@ -11314,12 +11328,7 @@ fn run_index_report_inner(
                     }
                 }
             }
-            if send_err.is_none() {
-                if let Err(error) = staged.as_file_mut().rewind() {
-                    send_err = Some(format!("rewind staged records for {}: {error}", f.rel));
-                }
-            }
-            if send_err.is_none() {
+            if let Some(mut reader) = reader.filter(|_| send_err.is_none()) {
                 // The second half of a mailbox's bar: staged bytes
                 // handed to the engine, out of staged bytes in total.
                 // Credit is taken at submission: the shared buffer
@@ -11327,9 +11336,7 @@ fn run_index_report_inner(
                 // flush carries them, and the bar measures reading
                 // work, not wire time.
                 let credit_send = sn.family == Family::Mbox;
-                let staged_len = staged.as_file().metadata().map(|m| m.len()).unwrap_or(0);
                 let mut staged_sent = 0u64;
-                let mut reader = BufReader::new(staged.as_file_mut());
                 // A LOCAL chunk, not the bulk: chunks join whatever
                 // the other workers are staging in the shared buffer,
                 // so a small file stops paying for its own round-trip.
