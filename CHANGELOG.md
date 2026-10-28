@@ -198,6 +198,15 @@ continues in #2427 and #1122, which stay open.
   batch's merge reservation, so concurrent merge admission sees it.
   `_forcemerge` batches are charged but never refused, and neither is a
   small batch that the yield-streak rule (#2468) lets run to completion (PR #2470).
+- `autoindex` bulk back-pressure patience is now measured since the last
+  progress, not since the first round. A window the server drains a few
+  records at a time (per-item 429 `resource_exhausted` on an embedding
+  deadline or admission refusal) used to abort with `bulk backend failed`
+  once the rounds together passed the 600 s `THROTTLE_PATIENCE`, even though
+  every round settled records. Each round that settles at least one item now
+  restarts the patience clock and the backoff; rounds that settle nothing
+  still count, so a server that answers 429 forever fails at the same limits
+  as before.
 
 - The parent memory breaker no longer flaps, and background merges and flush
   finalizes are bounded while it is engaged (#2427). A 3,000 MB autoindex run
