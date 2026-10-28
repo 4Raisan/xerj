@@ -1512,12 +1512,22 @@ pub async fn create_index(
     // (#2281). A schema-only pass cannot: the stored mapping was the request
     // body, so a template `semantic_text` was rendered back as `object`, and
     // the template's settings were never copied.
-    let (mappings_val, merged_settings) = state.engine.merge_index_template(
+    let (mut mappings_val, merged_settings) = state.engine.merge_index_template(
         &index,
         body.get("mappings").cloned().unwrap_or(Value::Null),
         body.get("settings").cloned().unwrap_or(Value::Null),
     );
     let settings_ref = (!merged_settings.is_null()).then_some(&merged_settings);
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, schema build and the
+    // mapping's persistence all read this merged value.
+    if let Some(props) = mappings_val.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
+        }
+    }
 
     // Validate mapping field types before creating — ES returns
     // mapper_parsing_exception for unsupported types.
@@ -2605,8 +2615,10 @@ pub async fn delete_index(
         .map(|v| v == "true")
         .unwrap_or(true);
 
-    let all = state.engine.list_indices().await;
-    let mut all_names: Vec<String> = all.iter().map(|i| i.name.clone()).collect();
+    // Selector resolution needs names, not statistics. Waiting for every
+    // sibling's schema/memtable locks can stall an otherwise independent
+    // DELETE before it even reaches the requested index (#2405).
+    let mut all_names = state.engine.index_name_list();
     // A failed index is deletable. Its name has to take part in selector
     // resolution or a literal `DELETE /broken` 404s and a wildcard silently
     // skips it — which is exactly the stuck state issue #206 describes.
@@ -3128,7 +3140,7 @@ pub struct EsPutMappingBody {
 pub async fn put_mapping(
     State(state): State<AppState>,
     Path(index): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     // Wildcard-expand index list.
     let targets = resolve_index_selector(&state, &index).await;
@@ -3179,6 +3191,16 @@ pub async fn put_mapping(
                 )
                     .into_response();
             }
+        }
+    }
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, the field parse and the
+    // merge into each target's stored mapping all read the request body.
+    if let Some(props) = body.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
         }
     }
 
@@ -3432,6 +3454,60 @@ fn embedder_warnings(state: &AppState, body: &Value) -> Vec<String> {
         proxy_endpoint: embedding.default_endpoint.clone(),
     };
     crate::embed_warning::semantic_embedder_warnings(body, &resolved)
+}
+
+/// True when `properties` (recursively) declares a `semantic_text` field
+/// without an explicit `dimensions`/`dims` — the shape #2407 is about.
+fn properties_have_bare_semantic_text(properties: &Value) -> bool {
+    let Some(obj) = properties.as_object() else {
+        return false;
+    };
+    obj.values().any(|spec| {
+        (spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none())
+            || spec
+                .get("properties")
+                .is_some_and(properties_have_bare_semantic_text)
+    })
+}
+
+/// Write `dimensions` into every bare `semantic_text` property, recursively.
+///
+/// #2407: a bare `semantic_text` was always sized at 384 (the built-in
+/// embedder's width) even when the server's own backend returns another
+/// width, so every document failed ingest with "embedding backend returned
+/// width N, mapping requires 384" and the just-created index sat green with
+/// 0 documents. Materializing the width into the mapping at creation time
+/// keeps the embedding contract explicit and immutable as designed, makes
+/// `GET _mapping` echo the real width, and leaves an explicit declaration
+/// untouched.
+fn materialize_semantic_dimensions(properties: &mut Value, dimensions: usize) {
+    let Some(obj) = properties.as_object_mut() else {
+        return;
+    };
+    for spec in obj.values_mut() {
+        if spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none()
+        {
+            if let Some(map) = spec.as_object_mut() {
+                map.insert("dimensions".into(), json!(dimensions));
+            }
+        }
+        if let Some(sub) = spec.get_mut("properties") {
+            materialize_semantic_dimensions(sub, dimensions);
+        }
+    }
+}
+
+/// The width this server's embedding backend actually produces: the confirmed
+/// identity width (for `proxy` this runs the #2306 probe, cached after the
+/// first confirmation), else 384 with a warning — the built-in default a bare
+/// mapping was always sized at. Resolved only when a mapping actually carries
+/// a bare `semantic_text`, so mappings without one never pay for a probe.
+fn confirmed_semantic_dimensions(state: &AppState) -> usize {
+    state.engine.confirmed_semantic_dimensions()
 }
 
 fn semantic_mapping_contract(

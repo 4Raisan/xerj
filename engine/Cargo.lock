@@ -7465,6 +7465,7 @@ dependencies = [
  "xerj-wasm",
  "xxhash-rust",
  "zip 9.0.5",
+ "zstd",
 ]
 
 [[package]]

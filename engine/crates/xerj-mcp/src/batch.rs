@@ -15,14 +15,14 @@ pub(crate) fn spec() -> Value {
             "type":"object", "additionalProperties":false,
             "properties":{
                 "queries":{"type":"array","minItems":1,"maxItems":50,
-                    "description":"Ordered queries. Duplicate keys are allowed; position is authoritative. Entire input is limited to 1 MiB.",
-                    "items":{"type":"object","additionalProperties":false,"properties":{
+                    "description":"Ordered queries. A plain string item is shorthand for {\"query\": <string>}. Duplicate keys are allowed; position is authoritative. Entire input is limited to 1 MiB.",
+                    "items":{"anyOf":[{"type":"string","minLength":1},{"type":"object","additionalProperties":false,"properties":{
                         "key":{"type":"string","description":"Optional correlation key, at most 256 UTF-8 bytes."},
                         "query":{"oneOf":[{"type":"string","minLength":1},{"type":"object"}],
                             "description":"Plain text or ES query clause. Cannot be combined with identifier/field."},
                         "identifier":{"type":"string","minLength":1,"description":"Exact value, used verbatim in a term query; requires field."},
                         "field":{"type":"string","minLength":1,"description":"Flat keyword field for identifier. Must be mapped as keyword wherever present; unreadable, absent or conflicting mappings fail this item."}
-                    }, "oneOf":[{"required":["query"]},{"required":["identifier","field"]}]}},
+                    }, "oneOf":[{"required":["query"]},{"required":["identifier","field"]}]}]}},
                 "index":{"type":"string","description":"Index or pattern; alternative to prefix. Defaults to ax-*."},
                 "prefix":{"type":"string","description":"Autoindex prefix, e.g. project searches project-*. Cannot combine with index."},
                 "size":{"type":"integer","minimum":1,"maximum":50,"default":3,"description":"Maximum hits per item."},
@@ -393,6 +393,14 @@ pub(crate) async fn execute(ctx: &Ctx, args: &Value) -> Result<String, String> {
         limit,
         items,
     } = envelope(args)?;
+    // #2497: a bare string item is shorthand for {"query": <string>}.
+    let items: Vec<Value> = items
+        .iter()
+        .map(|item| match item {
+            Value::String(s) => json!({ "query": s }),
+            other => other.clone(),
+        })
+        .collect();
     // Validate locally before any I/O; invalid items do not sink siblings.
     let validation: Vec<_> = items.iter().map(validate_item).collect();
     let needs_mapping = items.iter().zip(&validation).any(|(item, valid)| {
