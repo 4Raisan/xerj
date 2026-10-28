@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A search with both `query` and a top-level `knn` returns `size` hits, not
+  `k` (#2561). The page was widened to `k`, so `size: 5, k: 20` returned
+  20 hits. `k` still sets how many nearest neighbours join the candidate
+  set, and `from`/`size` page through the union, as in Elasticsearch.
 - Index deletion no longer waits for unrelated index statistics while
   resolving its selectors. Index listings and health checks also release
   their index-map locks before awaiting statistics, so a stalled schema

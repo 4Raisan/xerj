@@ -14177,9 +14177,19 @@ async fn search_impl(
         } else {
             knn_query_json
         };
+        // A pure knn search is raised to `k` here and trimmed back by
+        // `knn_total_cap`. A hybrid search keeps the request's `size`
+        // (#2561): the engine pins the full top-k into the union itself
+        // (`pin_knn_clause`), so `k` widens the candidate set, and `size`
+        // is how many hits come back, as in ES.
+        let size = if body.query.is_some() {
+            body.size
+        } else {
+            body.size.max(k_total)
+        };
         EsSearchBody {
             query: Some(merged_query),
-            size: body.size.max(k_total),
+            size,
             knn: None,
             ..body.clone()
         }
