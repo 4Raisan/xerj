@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Index deletion no longer waits for unrelated index statistics while
+  resolving its selectors. Index listings and health checks also release
+  their index-map locks before awaiting statistics, so a stalled schema
+  update does not hold those locks against DELETE (part of #2405; extracted
+  from #2489). Merge/flush cancellation and the process memory cap remain
+  separate follow-ups.
 - `xerj autoindex` compresses per-file phase-B stages with zstd level 1 and
   uses temporary files cleaned up by the operating system when the client
   exits (#2493, part of #2427). It finishes buffered compression before

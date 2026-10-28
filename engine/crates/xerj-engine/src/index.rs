@@ -10712,6 +10712,13 @@ pub struct Index {
     merge_batches_deferred: std::sync::atomic::AtomicBool,
 }
 
+/// Keeps one index's schema unavailable to statistics until dropped.
+#[cfg(any(test, feature = "lock-test-hook"))]
+#[doc(hidden)]
+pub struct TestSchemaWriteHold(
+    #[allow(dead_code)] tokio::sync::OwnedRwLockWriteGuard<ManagedSchema>,
+);
+
 /// Counts one `Index::refresh` that got past the test hold, on every exit.
 #[cfg(any(test, feature = "refresh-test-hook"))]
 struct TestRefreshFinished<'a>(&'a Index);
@@ -28591,6 +28598,13 @@ impl Index {
             });
         }
         out
+    }
+
+    /// Deterministic stand-in for a stalled schema update (#2405).
+    #[cfg(any(test, feature = "lock-test-hook"))]
+    #[doc(hidden)]
+    pub async fn test_hold_schema_write(&self) -> TestSchemaWriteHold {
+        TestSchemaWriteHold(Arc::clone(&self.schema).write_owned().await)
     }
 
     pub async fn stats(&self) -> IndexStats {
