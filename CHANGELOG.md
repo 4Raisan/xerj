@@ -160,6 +160,10 @@ continues in #2427 and #1122, which stay open.
   answer and gave up on the CLI. Those guesses, and `--size`, `--limit`,
   `--top`, `--top-k`, `-n` and `-i`, now point at `--prefix <P>` or
   `-k <N>`.
+- `xerj_batch_search` (and `xerj batch-search`) accept a plain string in
+  `queries` as shorthand for `{"query": <string>}` (#2497). A string item
+  used to fail alone with "arguments must be a JSON object", so an agent
+  that sent `["a", "b"]` lost a call; the advertised schema now allows it.
 
 - `xerj corpus add` accepts a local Windows path such as
   `F:\Projects\Foo` (#2472). The repo name was the text after the last `/`,
