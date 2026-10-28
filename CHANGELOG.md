@@ -154,6 +154,13 @@ continues in #2427 and #1122, which stay open.
 
 ### Fixed
 
+- `xerj search` names an unknown flag on one line and exits 2 instead of
+  following "unexpected argument" with the whole usage text (#2458). An
+  agent that guessed `--index` and `--max-hits` read the help dump as the
+  answer and gave up on the CLI. Those guesses, and `--size`, `--limit`,
+  `--top`, `--top-k`, `-n` and `-i`, now point at `--prefix <P>` or
+  `-k <N>`.
+
 - `xerj corpus add` accepts a local Windows path such as
   `F:\Projects\Foo` (#2472). The repo name was the text after the last `/`,
   so a `\`-separated path stayed whole and was refused as an unsafe repo
