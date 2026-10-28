@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Index deletion no longer waits for unrelated index statistics while
+  resolving its selectors. Index listings and health checks also release
+  their index-map locks before awaiting statistics, so a stalled schema
+  update does not hold those locks against DELETE (part of #2405; extracted
+  from #2489). Merge/flush cancellation and the process memory cap remain
+  separate follow-ups.
 - `xerj autoindex` compresses per-file phase-B stages with zstd level 1 and
   uses temporary files cleaned up by the operating system when the client
   exits (#2493, part of #2427). It finishes buffered compression before
@@ -30,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   restarts the patience clock and the backoff; rounds that settle nothing
   still count, so a server that answers 429 forever fails at the same limits
   as before.
+- `xerj autoindex` titles a prose file that opens with YAML frontmatter from
+  its `title:` key, or from the first line after the closing `---` when there
+  is none (#2556). Every such file (Jekyll, Hugo, Obsidian) used to be titled
+  `---`, its opening fence. A leading `---` block that is not parseable
+  frontmatter (unclosed, not a YAML mapping, over 64 KiB) takes the first line
+  that is not a bare `---`; the body, the frontmatter text in it and
+  `start_line` are unchanged. An unchanged file is not re-extracted, so re-index
+  with `xerj autoindex --fresh` to retitle documents already in an index.
 
 ## [1.0.0-rc.100] - 2026-10-26
 
@@ -178,6 +192,20 @@ continues in #2427 and #1122, which stay open.
   [#2433](https://github.com/xerj-org/xerj/issues/2433)).
 
 ### Fixed
+
+- A `semantic_text` field declared without `dimensions` is now sized at the
+  width the server's embedding backend actually produces, when that width is
+  confirmed (#2407, defect 1). It used to be always 384, so behind a `proxy`
+  returning another width (768, 1024, …) every document failed ingest with
+  "embedding backend returned width N, mapping requires 384", and the new
+  index stayed green with no semantic documents. Index creation,
+  `PUT _mapping` and templates (including indices that `_bulk` creates
+  automatically) write the width into the mapping, so `GET _mapping` shows it.
+  An explicit `dimensions` still wins. Indices created before this change keep
+  their stored 384 mapping. Re-declaring a bare `semantic_text` on one of them
+  while running a backend of another width is now refused by the immutable
+  embedding contract. When the width cannot be confirmed, the field is still
+  sized at 384, and the server logs a warning.
 
 - `xerj search` names an unknown flag on one line and exits 2 instead of
   following "unexpected argument" with the whole usage text (#2458). An
