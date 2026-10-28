@@ -2015,6 +2015,15 @@ mod flush_publication_recovery_tests {
         assert_eq!(idx.search(&request).await.unwrap().hits[0].id, "survivor");
     }
 
+    fn topk_projection_config(dir: &std::path::Path) -> Config {
+        let mut config = Config::default();
+        config.server.data_dir = dir.to_string_lossy().into_owned();
+        // These tests exercise large, columnar segments. The CPU-dependent
+        // default can split the fixture below the row-window or ZBS2 threshold.
+        config.engine.ingest_shards = 1;
+        config
+    }
+
     fn topk_projection_schema() -> Schema {
         let mut schema = Schema::empty();
         for f in ["title", "body", "blob"] {
@@ -2035,9 +2044,7 @@ mod flush_publication_recovery_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cold_broad_topk_reads_identities_and_hydrates_only_winners() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.server.data_dir = dir.path().to_string_lossy().into_owned();
-        let engine = crate::Engine::new(config).unwrap();
+        let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
         engine
             .create_index("broad-cold", topk_projection_schema())
             .unwrap();
@@ -2068,9 +2075,7 @@ mod flush_publication_recovery_tests {
         drop(engine);
 
         let reopen = || {
-            let mut c = Config::default();
-            c.server.data_dir = dir.path().to_string_lossy().into_owned();
-            let engine = crate::Engine::new(c).unwrap();
+            let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
             let idx = engine.get_index("broad-cold").unwrap();
             idx.abort_background_tasks();
             // Hold the background warm back so each query is observed alone.
@@ -2178,9 +2183,7 @@ mod flush_publication_recovery_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cold_topk_with_source_includes_reads_only_winning_rows() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.server.data_dir = dir.path().to_string_lossy().into_owned();
-        let engine = crate::Engine::new(config).unwrap();
+        let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
         engine
             .create_index("topk-cold", topk_projection_schema())
             .unwrap();
@@ -2205,9 +2208,7 @@ mod flush_publication_recovery_tests {
         drop(engine);
 
         let reopen = || {
-            let mut c = Config::default();
-            c.server.data_dir = dir.path().to_string_lossy().into_owned();
-            let engine = crate::Engine::new(c).unwrap();
+            let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
             let idx = engine.get_index("topk-cold").unwrap();
             idx.abort_background_tasks();
             (engine, idx)
@@ -2318,9 +2319,7 @@ mod flush_publication_recovery_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn cold_stored_scan_with_source_includes_decodes_only_kept_columns() {
         let dir = tempfile::tempdir().unwrap();
-        let mut config = Config::default();
-        config.server.data_dir = dir.path().to_string_lossy().into_owned();
-        let engine = crate::Engine::new(config).unwrap();
+        let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
         engine
             .create_index("scan-cold", topk_projection_schema())
             .unwrap();
@@ -2351,13 +2350,13 @@ mod flush_publication_recovery_tests {
         drop(engine);
 
         let reopen = || {
-            let mut c = Config::default();
-            c.server.data_dir = dir.path().to_string_lossy().into_owned();
-            let engine = crate::Engine::new(c).unwrap();
+            let engine = crate::Engine::new(topk_projection_config(dir.path())).unwrap();
             let idx = engine.get_index("scan-cold").unwrap();
             idx.abort_background_tasks();
             let held: Vec<String> = {
                 let snapshot = idx.store.snapshot();
+                assert_eq!(snapshot.segments.len(), 1, "single-shard fixture");
+                assert_eq!(snapshot.segments[0].doc_count, 1500);
                 snapshot.segments.iter().map(|s| s.id.to_string()).collect()
             };
             for id in &held {
@@ -2426,16 +2425,14 @@ mod flush_publication_recovery_tests {
             .iter()
             .map(|h| (h.id.clone(), segs[0].clone()))
             .collect();
-        if segs.len() == 1 {
-            idx.locate_scan_projected_rows(&cold.hits, &seg_of, &mut row_projected);
-            assert_eq!(row_projected.len(), cold.hits.len());
-            for h in &cold.hits {
-                let (seg, pos) = &row_projected[&h.id];
-                let mut rows = idx.hydrate_fts_rows_cold(seg, &[*pos], None).unwrap();
-                let doc = rows.remove(pos).unwrap();
-                assert_eq!(doc["_id"].as_str(), Some(h.id.as_str()));
-                assert!(doc["_source"]["body_vector_chunks"].is_array());
-            }
+        idx.locate_scan_projected_rows(&cold.hits, &seg_of, &mut row_projected);
+        assert_eq!(row_projected.len(), cold.hits.len());
+        for h in &cold.hits {
+            let (seg, pos) = &row_projected[&h.id];
+            let mut rows = idx.hydrate_fts_rows_cold(seg, &[*pos], None).unwrap();
+            let doc = rows.remove(pos).unwrap();
+            assert_eq!(doc["_id"].as_str(), Some(h.id.as_str()));
+            assert!(doc["_source"]["body_vector_chunks"].is_array());
         }
         drop(idx);
         drop(engine);
