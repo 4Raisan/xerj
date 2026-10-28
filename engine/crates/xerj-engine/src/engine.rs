@@ -4016,11 +4016,11 @@ impl Engine {
     /// blanket refusal.
     pub async fn list_indices(&self) -> Vec<IndexInfo> {
         let mut list = Vec::new();
-        for entry in self.indices.iter() {
-            if !crate::index_guard::visible(entry.key()) {
+        for (name, idx) in self.open_index_handles() {
+            if !crate::index_guard::visible(&name) {
                 continue;
             }
-            let stats = entry.value().stats().await;
+            let stats = idx.stats().await;
             list.push(IndexInfo {
                 name: stats.name,
                 doc_count: stats.doc_count,
@@ -4029,6 +4029,17 @@ impl Engine {
             });
         }
         list
+    }
+
+    /// Snapshot handles for read-only statistics, releasing every DashMap
+    /// iterator guard before awaiting an index. A stalled schema lock must
+    /// not hold the map shard against an index deletion or insertion (#2405).
+    /// This preserves the existing observational (non-atomic) stats contract.
+    fn open_index_handles(&self) -> Vec<(String, Arc<Index>)> {
+        self.indices
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect()
     }
 
     /// Get the stats for a single index.
@@ -4117,8 +4128,8 @@ impl Engine {
         let mut total_docs = 0u64;
         let mut has_memtable_only = false;
 
-        for entry in self.indices.iter() {
-            let stats = entry.value().stats().await;
+        for (_, idx) in self.open_index_handles() {
+            let stats = idx.stats().await;
             total_docs += stats.doc_count;
             // Yellow condition: any index has in-memory data that hasn't been
             // flushed to a segment yet.
