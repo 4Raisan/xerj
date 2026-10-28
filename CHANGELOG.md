@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- A `filter` or `must_not` clause no longer changes `_score` before a flush
+  (#2403). `bool{must:[match], filter:[term]}` scored buffered documents with
+  an IDF-less `1 + ln(1 + tf)`, so on the issue's repro the top hit scored
+  2.609438 and three hits tied at 1.6931472, while the bare `match` scored
+  0.6979745, 0.60089254, 0.5022658 and 0.2530558; the ranking changed at
+  flush. The `must` match now takes the same BM25 path as the bare `match`
+  and the non-scoring clauses only remove hits. On an index with flushed and
+  buffered documents, the shared BM25 statistics also count the buffered
+  documents for this shape, so flushed hits score as they do under the bare
+  `match`. Covers one `must` match (without its own `analyzer`) plus any
+  `filter` or `must_not` clauses with no `should`; other `bool` shapes keep
+  their current route.
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
