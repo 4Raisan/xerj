@@ -39,6 +39,35 @@ const CHUNK_OVERLAP: usize = 10;
 /// multi-megabyte record that would blow up `_source` on every hit.
 const CHUNK_MAX_BYTES: usize = 8 << 10;
 
+/// Byte offset just past a leading `---` … `---` frontmatter block, or `None`
+/// when the text does not open with one.
+///
+/// A closing fence must exist: an unterminated opening `---` is an ordinary
+/// horizontal rule, and a document that merely starts with one keeps its first
+/// line as the title.
+fn frontmatter_end(text: &str) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut opened = false;
+    for line in text.split_inclusive('\n') {
+        offset += line.len();
+        let trimmed = line.trim();
+        if !opened {
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed != "---" {
+                return None;
+            }
+            opened = true;
+            continue;
+        }
+        if trimmed == "---" {
+            return Some(offset);
+        }
+    }
+    None
+}
+
 pub fn extract_prose(path: &Path, gzip: bool, sink: Sink) -> Result<ExtractStats> {
     let mut stats = ExtractStats::default();
     let Some(bytes) = super::read_whole(path, gzip, TXT_CAP)? else {
@@ -46,7 +75,16 @@ pub fn extract_prose(path: &Path, gzip: bool, sink: Sink) -> Result<ExtractStats
         return Ok(stats);
     };
     let (text, _) = crate::sniff::decode_text(&bytes);
-    let title = text
+    // #2556: a markdown file that opens with a `---` frontmatter block took its
+    // title from the fence itself, so every such page was titled `---` in the
+    // index and in search results. The frontmatter is metadata, not the
+    // document: skip it when looking for the title. It stays in the indexed body
+    // below so `description:`/`tags:` remain searchable.
+    let title_source = match frontmatter_end(&text) {
+        Some(end) => &text[end..],
+        None => text.as_str(),
+    };
+    let title = title_source
         .lines()
         .find(|l| !l.trim().is_empty())
         .map(|l| {
@@ -337,5 +375,39 @@ mod chunk_tests {
                 "start_line {line} does not hold the section start: {first:?} vs {source:?}"
             );
         }
+    }
+
+    /// #2556: a markdown page that opens with a `---` frontmatter block was
+    /// titled `---` — the fence itself was the first non-blank line. The
+    /// frontmatter is metadata, so the title has to come from the body.
+    #[test]
+    fn a_frontmatter_markdown_page_is_titled_from_its_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("post.md");
+        std::fs::write(
+            &p,
+            "---\ntitle: A page\ntags: [a, b]\n---\n\n# Outage postmortem\n\nThe pool was exhausted.\n",
+        )
+        .unwrap();
+        let mut titles = Vec::new();
+        {
+            let mut sink = |r: RawRecord| {
+                titles.push(r.fields["title"].as_str().unwrap_or("").to_string());
+                true
+            };
+            extract_prose(&p, false, &mut sink).unwrap();
+        }
+        assert_eq!(titles, vec!["# Outage postmortem".to_string()]);
+    }
+
+    /// An unterminated opening `---` is a horizontal rule, not a fence, so the
+    /// title stays the first line.
+    #[test]
+    fn an_unterminated_fence_does_not_hide_the_title() {
+        assert_eq!(frontmatter_end("---\nJust prose.\n"), None);
+        assert_eq!(
+            frontmatter_end("---\ntitle: x\n---\nbody\n"),
+            Some("---\ntitle: x\n---\n".len())
+        );
     }
 }
