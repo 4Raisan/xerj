@@ -66,6 +66,10 @@ jobs:
       - name: Date-source unit tests (full, shallow, untracked, no repo)
         run: python3 scripts/seo/test_urlmap.py
 
+      # HTTP is mocked; the post-deploy probe itself is never run in CI.
+      - name: Offline canonical-verifier unit tests
+        run: python3 scripts/seo/test_verify_live.py
+
       # Fixture HTTP server only: production verification runs after deploy.
       - name: Agent-discovery delivery regressions
         run: python3 scripts/seo/test_verify_agent_discovery.py
