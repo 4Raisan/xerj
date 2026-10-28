@@ -1,17 +1,16 @@
 //! Per-file staging area for phase B (#2427).
 //!
 //! Phase B stages every record of a file locally, re-verifies the source, and
-//! only then makes the file visible on the node (#1911). Two properties of
-//! the old staging file showed up in the 1 GB gate's fair autoindex leg
-//! (state dir at 677 MB, three `.autoindex-stage-*` files of ~215 MB each):
+//! only then makes the file visible on the node (#1911). Finish the compressed
+//! stream before deleting any prior records: buffered writes may fail at
+//! finalization. Two properties motivated replacing the old staging file:
 //!
 //! * **Size.** A staged record is the bulk action line plus the document with
 //!   its provenance fields (`ax_path`, `ax_paths`, `ax_file`, `ax_run`, ...).
-//!   For row-shaped sources that is several times the source: a 31.7 MB ADS-B
-//!   trace staged as ~215 MB (6.8x). With `--workers 4`, the stages of the
-//!   files in flight held hundreds of megabytes of disk for minutes while the
-//!   node throttled bulks. The staged stream is extremely repetitive (the same
-//!   index name, path, key, run id and dataset on every record), so it is now
+//!   For row-shaped sources the provenance can exceed the source data, and
+//!   concurrent workers each retain a stage while bulks are throttled.
+//!   The staged stream repeats the same
+//!   index name, path, key, run id and dataset on every record, so it is now
 //!   zstd-compressed on the way to disk; see the test for the ratio on a
 //!   trace-shaped file.
 //! * **Lifetime.** The stage was a *named* temp file. `NamedTempFile::drop`
@@ -19,21 +18,22 @@
 //!   signal (`timeout`, Ctrl-C, OOM kill) never runs drop, so the files stayed
 //!   in the state dir until the next run's journal open swept them. The stage
 //!   is now an *unnamed* temp file (`O_TMPFILE` on Linux, unlinked at creation
-//!   elsewhere): the kernel frees it when the descriptor closes, including on
-//!   SIGKILL, so nothing can be left behind. The journal-open sweep of the
+//!   on other Unix systems): the kernel frees it when the descriptor closes, including on
+//!   SIGKILL. Windows uses delete-on-close. The journal-open sweep of the
 //!   reserved prefix stays for state dirs written by older binaries.
 //!
 //! A blocking global byte budget was considered and rejected: a worker parked
 //! on it still counts as "could add bytes" for the shared bulk pipe's settle
-//! barrier, so the oldest stage's settle could wait on it forever. The bound
-//! is instead `workers x compressed stage`, which the compression keeps small.
+//! barrier, so the oldest stage's settle could wait on it forever. Disk use
+//! still depends on concurrent stages and their compressibility; this is not
+//! a hard disk quota or a fix for the node's process memory limit.
 
 use std::fs::File;
 use std::io::{self, BufReader, Seek, Write};
 use std::path::Path;
 
-/// zstd level for stages: level 1 compresses this stream >10x at hundreds of
-/// MB/s, far above phase B's send rate, so it never paces the run.
+/// Use zstd's fast level; avoid the high-effort compression that previously
+/// stalled background merges (#2441). Savings depend on the input.
 const STAGE_ZSTD_LEVEL: i32 = 1;
 
 /// Reader over a finished stage: the decompressed NDJSON, in write order.
@@ -43,6 +43,8 @@ pub(crate) type StageReader = BufReader<zstd::stream::read::Decoder<'static, Buf
 pub(crate) struct Stage {
     encoder: zstd::stream::write::Encoder<'static, File>,
     raw_bytes: u64,
+    #[cfg(test)]
+    state_dir: std::path::PathBuf,
 }
 
 impl Stage {
@@ -54,6 +56,8 @@ impl Stage {
         Ok(Self {
             encoder,
             raw_bytes: 0,
+            #[cfg(test)]
+            state_dir: dir.to_path_buf(),
         })
     }
 
@@ -65,6 +69,9 @@ impl Stage {
     /// Finish compression and return a reader positioned at the first staged
     /// line, plus the compressed size on disk.
     pub(crate) fn into_reader(self) -> io::Result<(StageReader, u64)> {
+        // Model a buffered write failing at finish, scoped to one test run.
+        #[cfg(test)]
+        crate::replacement_failpoint(5, &self.state_dir).map_err(io::Error::other)?;
         let mut file = self.encoder.finish()?;
         let disk_bytes = file.stream_position()?;
         file.rewind()?;
@@ -122,6 +129,7 @@ mod tests {
         let raw = stage.raw_bytes();
         assert_eq!(raw, expected.iter().map(|r| r.len() as u64).sum::<u64>());
         let (mut reader, disk) = stage.into_reader().unwrap();
+        eprintln!("trace stage: raw_bytes={raw} compressed_bytes={disk}");
         // Several times smaller on disk than the stream the node will receive.
         assert!(
             disk * 5 < raw,
@@ -156,10 +164,13 @@ mod tests {
                     .unwrap();
             }
         }
-        // Live stages have no directory entry, so neither an abandoned retry
+        // On Unix live stages have no directory entry, so neither an abandoned retry
         // nor a client killed mid-file (no drop runs) can leave one behind.
+        // Windows delete-on-close files may remain visible until closed.
+        #[cfg(unix)]
         assert_eq!(listing(), 0);
         let (reader, _) = stages.pop().unwrap().into_reader().unwrap();
+        #[cfg(unix)]
         assert_eq!(listing(), 0);
         drop(reader);
         drop(stages);
@@ -174,5 +185,30 @@ mod tests {
         let (mut reader, _) = stage.into_reader().unwrap();
         let mut line = String::new();
         assert_eq!(reader.read_line(&mut line).unwrap(), 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn buffered_stage_write_can_fail_only_when_finishing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let mut stage = Stage {
+            encoder: zstd::stream::write::Encoder::new(file, STAGE_ZSTD_LEVEL).unwrap(),
+            raw_bytes: 0,
+            state_dir: dir.path().to_owned(),
+        };
+        let bytes = b"{\"index\":{}}\n{\"value\":\"buffered until finish\"}\n";
+        stage
+            .write_all(bytes)
+            .expect("small writes are buffered by zstd");
+        assert_eq!(stage.raw_bytes(), bytes.len() as u64);
+        let error = stage
+            .into_reader()
+            .err()
+            .expect("finishing must report ENOSPC");
+        assert_eq!(error.raw_os_error(), Some(libc::ENOSPC));
     }
 }

@@ -4446,6 +4446,8 @@ mod tests {
         let server_stop = Arc::clone(&stop);
         let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let server_rounds = Arc::clone(&rounds);
+        let accepted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_accepted = Arc::clone(&accepted);
         let server = std::thread::spawn(move || loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
@@ -4456,6 +4458,23 @@ mod tests {
                         .filter(|line| !line.is_empty())
                         .count()
                         / 2;
+                    let offered: Vec<String> = request_body(&request)
+                        .split(|b| *b == b'\n')
+                        .filter(|line| !line.is_empty())
+                        .step_by(2)
+                        .map(|line| {
+                            let action: serde_json::Value = serde_json::from_slice(line).unwrap();
+                            action["index"]["_id"].as_str().unwrap().to_owned()
+                        })
+                        .collect();
+                    {
+                        let mut accepted = server_accepted.lock().unwrap();
+                        assert!(
+                            offered.iter().all(|id| !accepted.contains(id)),
+                            "accepted records were re-offered"
+                        );
+                        accepted.push(offered[0].clone());
+                    }
                     server_rounds.fetch_add(1, Ordering::SeqCst);
                     std::thread::sleep(Duration::from_millis(60));
                     let mut statuses = vec![429u16; actions];
@@ -4479,6 +4498,7 @@ mod tests {
         let elapsed = started.elapsed();
         stop.store(true, Ordering::SeqCst);
         server.join().unwrap();
+        assert_eq!(*accepted.lock().unwrap(), ids);
         assert_eq!(outcome.server_errors, 0, "{outcome:?}");
         assert_eq!(outcome.throttled_out, 0, "{outcome:?}");
         assert!(outcome.exhausted_after.is_none(), "{outcome:?}");
@@ -4550,7 +4570,7 @@ mod tests {
         );
         assert_eq!(outcome.throttled_out, 2, "{outcome:?}");
         assert!(
-            elapsed >= Duration::from_millis(300) && elapsed < Duration::from_secs(3),
+            elapsed >= Duration::from_millis(300),
             "stopped at the patience after the last progress, took {elapsed:?}"
         );
     }

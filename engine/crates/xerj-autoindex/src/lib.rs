@@ -11273,9 +11273,28 @@ fn run_index_report_inner(
                     continue;
                 }
             }
+            // Finish buffered compression before the first remote mutation.
+            // ENOSPC can surface here even when every earlier write succeeded;
+            // keep the previous records live and the replacement pending then.
+            // Reference: tantivy 3a55bc98, src/directory/mmap_directory/mod.rs:
+            // 372-376 flushes the temporary writer before publishing its file.
+            // The stage is consumed here whether or not the send runs: an
+            // early error drops it, and the unnamed file goes with it.
+            let staged_len = staged.raw_bytes();
+            let mut reader = None;
+            if send_err.is_none() {
+                match staged.into_reader() {
+                    Ok((r, _disk)) => reader = Some(r),
+                    Err(error) => {
+                        send_err = Some(format!("finish staged records for {}: {error}", f.rel));
+                    }
+                }
+            } else {
+                drop(staged);
+            }
             // Visibility begins only after extraction and the second
-            // full-content verification. Delete-before-replace makes
-            // a retry clean up any partial prior attempt.
+            // full-content verification and stage finalization.
+            // Delete-before-replace makes a retry clean up any partial prior attempt.
             if send_err.is_none() && cleanup_required.contains(key) {
                 let prior = superseded.get(&f.rel);
                 let mut indices: Vec<String> = fa
@@ -11308,20 +11327,6 @@ fn run_index_report_inner(
                         send_err = Some(format!("{error:#}"));
                     }
                 }
-            }
-            // The stage is consumed here whether or not the send runs: an
-            // early error drops it, and the unnamed file goes with it.
-            let staged_len = staged.raw_bytes();
-            let mut reader = None;
-            if send_err.is_none() {
-                match staged.into_reader() {
-                    Ok((r, _disk)) => reader = Some(r),
-                    Err(error) => {
-                        send_err = Some(format!("rewind staged records for {}: {error}", f.rel));
-                    }
-                }
-            } else {
-                drop(staged);
             }
             if let Some(mut reader) = reader.filter(|_| send_err.is_none()) {
                 // The second half of a mailbox's bar: staged bytes

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `xerj autoindex` compresses per-file phase-B stages with zstd level 1 and
+  uses temporary files cleaned up by the operating system when the client
+  exits (#2493, part of #2427). It finishes buffered compression before
+  deleting previous records, so a stage finalization error preserves the old
+  records and an ordinary resume can complete the replacement. Compression
+  savings depend on the data; this does not impose a disk or server-memory cap.
+- `autoindex` bulk back-pressure patience is now measured since the last
+  progress, not since the first round. A window the server drains a few
+  records at a time (per-item 429 `resource_exhausted` on an embedding
+  deadline or admission refusal) used to abort with `bulk backend failed`
+  once the rounds together passed the 600 s `THROTTLE_PATIENCE`, even though
+  every round settled records. Each round that settles at least one item now
+  restarts the patience clock and the backoff; rounds that settle nothing
+  still count, so a server that answers 429 forever fails at the same limits
+  as before.
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
@@ -17,8 +35,9 @@ return (#2443, #2434, #2454, #2465). Search keeps its own share of the memory
 budget while merges run (#2484, #2485), autoindex plans large folders in
 bounded memory with fewer, larger datasets (#2417, #2430), and a
 `semantic_text` test segment shrinks from 20.1 MB to 1.8 MB on disk
-(#2471). Every release candidate now passes a performance gate with autoindex and search budgets
-and an Elasticsearch floor before it ships (#2432). Thank you to everyone
+(#2471). A local performance harness adds autoindex and search budgets and an
+Elasticsearch floor (#2432); release-workflow integration remains open in
+#2433. Thank you to everyone
 who filed a field report: they shaped this release. The memory-ceiling work
 continues in #2427 and #1122, which stay open.
 
@@ -126,9 +145,9 @@ continues in #2427 and #1122, which stay open.
 
 - **Release performance gate** for autoindex and search. It adds
   `gen_corpus.py`, `autoindex_release_gate.sh` and `gate.py`, with per-phase
-  budgets, an Elasticsearch floor and an rc.99 comparison harness, and it
-  runs before a release is cut (#2432). The live-tree memory follow-up is
-  tracked in #2433, which stays open.
+  budgets, an Elasticsearch floor and an rc.99 comparison harness (#2432).
+  Release-workflow wiring and the live-tree memory follow-up remain pending
+  in #2433; the harness is currently available for local runs.
 
 - `xerj init` prints the Kimi CLI MCP config path (`~/.kimi-code/mcp.json`),
   and the README marks the Kimi CLI row as tested (#2386).
@@ -170,14 +189,6 @@ continues in #2427 and #1122, which stay open.
   so a `\`-separated path stayed whole and was refused as an unsafe repo
   name; it now names the repo `Foo`, as `F:/Projects/Foo` already did.
 
-- `xerj autoindex` no longer leaves large `.autoindex-stage-*` files in the
-  state dir (#2427, PR [#2493](https://github.com/xerj-org/xerj/pull/2493)).
-  Phase B staged each file as uncompressed NDJSON in a named temp file, which
-  was several times the size of the source for row-shaped data (a 31.7 MB
-  trace staged as about 215 MB) and was left behind when the client was
-  killed by a signal. Stages are now zstd-compressed and written to an
-  unnamed temp file that the kernel frees when the client exits, however it
-  exits.
 - `xerj code` shows the part of a long definition that matched the query,
   not its first `--full` characters (#2464). The matching text could sit
   thousands of characters below the signature, so a hit named the right
@@ -198,15 +209,6 @@ continues in #2427 and #1122, which stay open.
   batch's merge reservation, so concurrent merge admission sees it.
   `_forcemerge` batches are charged but never refused, and neither is a
   small batch that the yield-streak rule (#2468) lets run to completion (PR #2470).
-- `autoindex` bulk back-pressure patience is now measured since the last
-  progress, not since the first round. A window the server drains a few
-  records at a time (per-item 429 `resource_exhausted` on an embedding
-  deadline or admission refusal) used to abort with `bulk backend failed`
-  once the rounds together passed the 600 s `THROTTLE_PATIENCE`, even though
-  every round settled records. Each round that settles at least one item now
-  restarts the patience clock and the backoff; rounds that settle nothing
-  still count, so a server that answers 429 forever fails at the same limits
-  as before.
 
 - The parent memory breaker no longer flaps, and background merges and flush
   finalizes are bounded while it is engaged (#2427). A 3,000 MB autoindex run
