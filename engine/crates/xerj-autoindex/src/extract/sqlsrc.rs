@@ -790,4 +790,36 @@ mod tests {
             .unwrap_or("");
         assert!(defs.contains("table t"), "{defs}");
     }
+
+    #[test]
+    fn cjk_comment_head_does_not_panic_or_hang() {
+        // Keep the recognized-comment compatibility control from #2586, and
+        // also require SQL symbol extraction for the formerly panicking heads.
+        // An ALTER-only file can take the prose route and miss both probes.
+        for (sql, expect_table) in [
+            (
+                "-- 中文字段整改：演示复现\nALTER TABLE t ADD COLUMN c VARCHAR(64);\n",
+                false,
+            ),
+            ("### 请先删除旧表;\nCREATE TABLE t (id int);\n", true),
+            ("中文注释;\nCREATE TABLE t (id int);\n", true),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(dir.path(), "cjk.sql", sql);
+            let (stats, recs) = indexed(&path);
+            assert!(stats.records > 0, "CJK comment file must be indexed safely");
+            assert!(!recs.is_empty(), "records must not be empty");
+            assert!(stats.refusal.is_none(), "{stats:?}");
+            if expect_table {
+                assert!(
+                    recs.iter().any(|r| r
+                        .fields
+                        .get("defs")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|defs| defs.contains("table t"))),
+                    "the regression must exercise SQL extraction, not prose fallback"
+                );
+            }
+        }
+    }
 }
