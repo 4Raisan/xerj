@@ -16,7 +16,9 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-use xerj_common::localauth::{discover_local_admin_key_for_url, url_is_loopback};
+use xerj_common::localauth::{
+    discover_local_admin_key_for_url, discover_local_admin_key_for_url_with_origin, url_is_loopback,
+};
 use xerj_common::xccode::{self, manifest, state, CodeOutcome, CodeParams, Mode, XcHttp};
 
 use crate::esclient::{Count, Es};
@@ -56,13 +58,19 @@ fn build_es(url: &str, api_key: Option<String>) -> Result<Es> {
                 Some(k) => Some(k),
                 None => {
                     if url_is_loopback(url) {
-                        discover_local_admin_key_for_url(url).map(|(k, path)| {
+                        discover_local_admin_key_for_url_with_origin(url).map(|found| {
                             eprintln!(
                                 "xerj code: no --api-key/XERJ_API_KEY given; using the admin \
-                                 key at {}",
-                                path.display()
+                                 key at {} ({})",
+                                found.path.display(),
+                                found.provenance()
                             );
-                            k
+                            if let Some(warning) =
+                                found.foreign_warning("--api-key or XERJ_API_KEY")
+                            {
+                                eprintln!("xerj code: warning: {warning}");
+                            }
+                            found.key
                         })
                     } else {
                         None

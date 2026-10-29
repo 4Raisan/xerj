@@ -21,6 +21,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- GitHub field-report submission uses the supported explicit-repository
+  `gh repo fork --clone=false` invocation and adds the fork remote itself
+  (#2596). The rollback test now verifies that the report was committed
+  before a failed push, rather than passing after an earlier fork failure.
+- Local admin-key discovery reports the source of the selected key and warns
+  when its directory is outside the working tree (#2578). Packaged installs
+  have their own provenance, and MCP guidance names `XERJ_AUTH`. Discovery
+  priority and explicit credential overrides are unchanged.
+
 - SQL source extraction no longer slices statement heads inside a UTF-8
   character, so unrecognized CJK statement/comment heads do not panic (#2547).
 - Short Markdown files with YAML frontmatter retain their prose body even

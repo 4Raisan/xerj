@@ -282,9 +282,11 @@ fn tools_paragraph(include_hub: bool) -> String {
 /// `.mcp.json` (project scope, meant to be committed) — without it, the
 /// documented one-command setup 401s on every tool call (#961).
 ///
-/// Returns the header value plus, when the value came from disk, the file it
-/// came from — the caller announces that path on stderr so the fallback is
-/// never silent (stdout stays JSON-RPC-only).
+/// Returns the header value plus, when the value came from disk, the
+/// [`xerj_common::localauth::DiscoveredKey`] it came from — the caller announces that path *and which
+/// discovery step found it* on stderr, so the fallback is never silent and a
+/// key that belongs to another project's node is visible as such (#2578).
+/// Stdout stays JSON-RPC-only.
 ///
 /// The loopback guard is the security boundary: discovery only ever runs for
 /// a URL whose host is this machine, so a locally readable key can never be
@@ -294,7 +296,10 @@ fn resolve_auth(
     auth_override: Option<String>,
     env_auth: Option<String>,
     base_url: &str,
-) -> (Option<String>, Option<std::path::PathBuf>) {
+) -> (
+    Option<String>,
+    Option<xerj_common::localauth::DiscoveredKey>,
+) {
     // Empty strings count as unset: an empty XERJ_AUTH in a committed
     // .mcp.json must not shadow discovery and turn into `Authorization: `.
     if let Some(explicit) = auth_override
@@ -306,10 +311,10 @@ fn resolve_auth(
     if !xerj_common::localauth::url_is_loopback(base_url) {
         return (None, None);
     }
-    match xerj_common::localauth::discover_local_admin_key_for_url(base_url) {
+    match xerj_common::localauth::discover_local_admin_key_for_url_with_origin(base_url) {
         // `XERJ_AUTH` is a complete header value ("ApiKey <token>"), so the
         // discovered bare key is formatted to the same documented shape.
-        Some((key, path)) => (Some(format!("ApiKey {key}")), Some(path)),
+        Some(found) => (Some(format!("ApiKey {}", found.key)), Some(found)),
         None => (None, None),
     }
 }
@@ -389,12 +394,18 @@ pub async fn run(args: &[String]) -> anyhow::Result<()> {
     // Announced, never silent (same rule as `xerj autoindex`): MCP hosts
     // spawn this server with an arbitrary cwd, so which `admin.key` the
     // relative candidates resolved to is exactly the thing an onboarding
-    // user needs to see when it works here and not there.
-    if let Some(path) = auth_key_file {
+    // user needs to see when it works here and not there. The provenance and
+    // the outside-the-working-tree warning are what make the "another
+    // project's node answered" case visible instead of invisible (#2578).
+    if let Some(found) = &auth_key_file {
         eprintln!(
-            "xerj-mcp: no --auth/XERJ_AUTH given; using the admin key at {}",
-            path.display()
+            "xerj-mcp: no --auth/XERJ_AUTH given; using the admin key at {} ({})",
+            found.path.display(),
+            found.provenance()
         );
+        if let Some(warning) = found.foreign_warning("--auth or XERJ_AUTH") {
+            eprintln!("xerj-mcp: warning: {warning}");
+        }
     }
 
     // stdout is the JSON-RPC channel; stderr is for logs only.
@@ -6271,10 +6282,19 @@ mod tests {
         sandbox.write("data/admin.key", "local-admin-key\n");
         let (auth, from) = resolve_auth(None, None, "http://localhost:9200");
         assert_eq!(auth.as_deref(), Some("ApiKey local-admin-key"));
+        let from = from.expect("the key came from disk, so the caller has a path to announce");
+        // Canonicalised because macOS reports the same directory as `/var/...`
+        // to the process and `/private/var/...` to `canonicalize`; the claim
+        // under test is "this file", not one spelling of it.
         assert_eq!(
-            from,
-            Some(sandbox.dir.path().join("data/admin.key")),
+            std::fs::canonicalize(&from.path).unwrap(),
+            std::fs::canonicalize(sandbox.dir.path().join("data/admin.key")).unwrap(),
             "the announced path is the file actually used"
+        );
+        assert_eq!(
+            from.origin,
+            xerj_common::localauth::KeyOrigin::WorkingDirectory,
+            "a ./data key is announced as the working directory's"
         );
 
         // The no-configuration shape: XERJ_URL unset means the loopback
@@ -6305,6 +6325,34 @@ mod tests {
                 "{url} must never be sent a key found on this disk"
             );
         }
+    }
+
+    /// #2578: the key a node publishes for its port can belong to a project
+    /// other than the one the MCP server was started in. The announcement has
+    /// to say so, and the warning has to fire, because otherwise the only
+    /// evidence is a path the reader may not recognise.
+    #[test]
+    fn a_key_published_by_another_projects_node_is_announced_and_flagged() {
+        let sandbox = Sandbox::new();
+        // The other project's node wrote its own key and published the pointer
+        // for :9200; this project has nothing.
+        sandbox.write("other-project/data/admin.key", "other-project-key\n");
+        let abs = sandbox.dir.path().join("other-project/data/admin.key");
+        xerj_common::localauth::publish_admin_key_for_port(9200, &abs).unwrap();
+
+        let (auth, from) = resolve_auth(None, None, "http://localhost:9200");
+        assert_eq!(auth.as_deref(), Some("ApiKey other-project-key"));
+        let from = from.expect("a discovered key is always announced");
+        assert_eq!(
+            from.origin,
+            xerj_common::localauth::KeyOrigin::PublishedByNode { port: 9200 }
+        );
+        assert_eq!(from.provenance(), "published by the node on port 9200");
+
+        // The sandbox cwd contains `other-project/`, so this particular key is
+        // inside the working tree and is not flagged. The flag itself is unit
+        // tested in `xerj_common::localauth`, where a cwd can be passed in.
+        assert_eq!(from.foreign_warning("--auth or XERJ_AUTH"), None);
     }
 
     /// A credential the user supplied is never overwritten by one found on
