@@ -3335,7 +3335,7 @@ impl Engine {
     }
 
     /// The concrete index a write to `name` must target when `name` is an
-    /// alias: a single backing index, or exactly one marked
+    /// alias: a single backing index unless explicitly disabled, or exactly one marked
     /// `is_write_index: true`. `Ok(None)` means `name` is not an alias (a
     /// concrete index or a name the caller may auto-create). More than one
     /// candidate is ambiguous and refused with ES's message.
@@ -3349,7 +3349,17 @@ impl Engine {
         let Some(backings) = self.aliases.get(name) else {
             return Ok(None);
         };
-        if backings.len() == 1 {
+        let single_write_disabled = backings.len() == 1
+            && self
+                .index_alias_metadata
+                .get(backings[0].as_str())
+                .is_some_and(|meta| {
+                    meta.get(name)
+                        .and_then(|alias_meta| alias_meta.get("is_write_index"))
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(false)
+                });
+        if backings.len() == 1 && !single_write_disabled {
             return Ok(Some(backings[0].clone()));
         }
         let mut writes = backings.iter().filter(|backing| {

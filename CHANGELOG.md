@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reindex preflights every source alias member before creating or writing the
   destination. Aliases cannot hide a source/destination overlap; a missing
   source, invalid query or source flush failure leaves destination data intact.
+  An alias with `is_write_index: false` refuses writes even with one member.
 
 - Corpus cloning validates existing checkouts and serializes writers (#2453).
   New checkouts are staged before publication. Ambiguous existing directories

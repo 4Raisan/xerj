@@ -357,3 +357,38 @@ async fn later_member_flush_failure_keeps_destination_unchanged_and_can_retry() 
         vec!["existing", "first", "second"]
     );
 }
+
+#[tokio::test]
+async fn explicitly_disabled_single_member_alias_refuses_writes_and_can_be_enabled() {
+    let (app, _dir) = app().await;
+    create_keyword_index(&app, "source").await;
+    doc(&app, "source", "one", "keep").await;
+    create_keyword_index(&app, "destination").await;
+    alias(
+        &app,
+        "destination",
+        "disabled",
+        json!({"is_write_index": false}),
+    )
+    .await;
+    let (status, body) = reindex(&app, "source", "disabled").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("no write index is defined"),
+        "{body}"
+    );
+    assert!(ids(&app, "destination").await.is_empty());
+    let (status, body) = call(&app, "PUT", "/disabled/_doc/direct", json!({"k":"direct"})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(ids(&app, "destination").await.is_empty());
+    alias(
+        &app,
+        "destination",
+        "disabled",
+        json!({"is_write_index": true}),
+    )
+    .await;
+    let (status, body) = reindex(&app, "source", "disabled").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(ids(&app, "destination").await, vec!["one"]);
+}
