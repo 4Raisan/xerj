@@ -984,7 +984,8 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                     "query": {
                         "type": "string",
                         "description": "What to search for, in plain words — the definition-first code search \
-                         `xerj search` runs. REQUIRED unless you pass `query_dsl` instead."
+                         `xerj search` runs. Use `query_dsl` for a structured clause. Omit both for \
+                         legacy match_all browsing; explicit query_dsl: {match_all: {}} is clearer."
                     },
                     "query_dsl": {
                         "type": "object",
@@ -2077,6 +2078,9 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
                 Ok(index) => index,
                 Err(msg) => return tool_text(msg, true),
             };
+            if let Err(msg) = search_query(&args) {
+                return tool_text(msg, true);
+            }
             // #1961: a plain-string query is shaped from the target's mapping,
             // exactly like `xerj search` (#1602). Without this, a prose corpus
             // answers HTTP 400 `strict_unknown_fields` because the body names
@@ -2552,6 +2556,32 @@ fn search_index(args: &Value) -> Result<String, String> {
     }
 }
 
+/// Resolve the new query fields before any mapping request while accepting
+/// legacy object-valued `query` and omitted-query browsing.
+fn search_query(args: &Value) -> Result<Option<&Value>, String> {
+    let dsl = match args.get("query_dsl") {
+        None | Some(Value::Null) => None,
+        Some(v @ Value::Object(_)) => Some(v),
+        Some(_) => return Err(
+            "`query_dsl` must be a JSON object, for example {\"query_dsl\": {\"match_all\": {}}}"
+                .into(),
+        ),
+    };
+    let query = args.get("query").filter(|v| !v.is_null());
+    if dsl.is_some() && query.is_some() {
+        return Err(
+            "pass either `query` (plain words) or `query_dsl` (an ES query-DSL clause), not both"
+                .into(),
+        );
+    }
+    match dsl.or(query) {
+        None => Ok(None),
+        Some(v @ Value::Object(_)) => Ok(Some(v)),
+        Some(v @ Value::String(q)) if !q.trim().is_empty() => Ok(Some(v)),
+        Some(_) => Err("`query` must be non-empty plain search text; use `query_dsl` for a structured ES query-DSL clause, for example {\"query_dsl\": {\"match_all\": {}}}".into()),
+    }
+}
+
 /// [`build_search`] with the target's `GET /{index}/_mapping` body (#1961).
 ///
 /// A plain-string query is shaped by `xerj_common::code_query` — the same
@@ -2566,64 +2596,22 @@ fn build_search_with_mapping(
     let index = search_index(args)?;
     let mut body = serde_json::Map::new();
     let mut plain_string = false;
-    // #2549: `query` is a plain string and `query_dsl` is the structured
-    // variant, so neither is union-typed. A model whose function-calling
-    // serialized a string into the old `["object", "string"]` field unquoted
-    // produced invalid JSON on one transport and `{}` on another, while every
-    // scalar-schema sibling tool round-tripped. The two fields are also
-    // mutually exclusive and one of them is required, so an empty-argument
-    // call fails loudly instead of searching for nothing and returning 0 hits.
-    let dsl = match args.get("query_dsl") {
-        None | Some(Value::Null) => None,
-        Some(v @ Value::Object(_)) => Some(v),
-        Some(_) => {
-            return Err("`query_dsl` must be a JSON object, for example \
-                        {\"query_dsl\": {\"match_all\": {}}}"
-                .into())
+    match search_query(args)? {
+        Some(Value::String(q)) if !q.trim().is_empty() => {
+            plain_string = true;
+            // The same mapping-aware, definition-first shape as `xerj search`.
+            let mapped = mapping.and_then(mapped_property_names);
+            let numeric = mapping.map(numeric_property_names);
+            let built = search_query_body_for_mapping(q, 10, mapped.as_ref(), numeric.as_ref());
+            body.insert("query".into(), built["query"].clone());
         }
-    };
-    let plain = match args.get("query") {
-        None | Some(Value::Null) => None,
-        Some(Value::String(q)) if q.trim().is_empty() => None,
-        Some(Value::String(q)) => Some(q.clone()),
-        Some(_) => {
-            return Err(
-                "`query` must be plain search text; pass a structured ES query-DSL \
-                        clause as `query_dsl`, for example {\"query_dsl\": {\"match_all\": {}}}"
-                    .into(),
-            )
+        Some(q @ Value::Object(_)) => {
+            body.insert("query".into(), q.clone());
         }
-    };
-    if let Some(dsl) = dsl {
-        if plain.is_some() {
-            return Err(
-                "pass either `query` (plain words) or `query_dsl` (an ES query-DSL \
-                        clause), not both"
-                    .into(),
-            );
+        None => {
+            body.insert("query".into(), json!({ "match_all": {} }));
         }
-        body.insert("query".into(), dsl.clone());
-    } else if let Some(q) = plain {
-        // A plain string gets the definition-first shape `xerj search` uses
-        // (measured 38%→94% correct-file-at-rank-1 on cross-file lookups vs a
-        // bare body match). Agents should never have to hand-write ES DSL for
-        // the common "find me this code" case; `query_dsl` stays available for
-        // structured queries.
-        plain_string = true;
-        // #1961: the mapping-aware body the CLI builds (#1601/#1602),
-        // including the #1759 exact-phrase leg. A prose corpus drops the
-        // `defs`/`name` clauses instead of 400ing on them; a code corpus
-        // (or an unreadable mapping) keeps the historical shape. `10`
-        // only fills the discarded `size` member.
-        let mapped = mapping.and_then(mapped_property_names);
-        let numeric = mapping.map(numeric_property_names);
-        let built = search_query_body_for_mapping(&q, 10, mapped.as_ref(), numeric.as_ref());
-        body.insert("query".into(), built["query"].clone());
-    } else {
-        return Err("pass `query` (plain words, e.g. {\"query\": \"rotate keys\"}) or \
-                    `query_dsl` (an ES query-DSL clause, e.g. {\"query_dsl\": {\"match_all\": {}}}); \
-                    a search with neither returns nothing, so it is an error"
-            .into());
+        Some(_) => return Err("`query` must be non-empty plain search text; use `query_dsl` for a structured ES query-DSL clause, for example {\"query_dsl\": {\"match_all\": {}}}".into()),
     }
     if let Some(n) = opt_u64(args, "size")? {
         body.insert("size".into(), json!(n));
@@ -4217,42 +4205,58 @@ mod tests {
         assert!(body["query"].is_object(), "{body}");
     }
 
-    /// #2549: `query` is a plain string and the ES DSL moved to `query_dsl`,
-    /// so neither field is union-typed. A model that serialized a string into
-    /// the old `["object", "string"]` field unquoted sent invalid JSON on one
-    /// transport and `{}` on another; a call with no query at all is now an
-    /// error naming both fields instead of a silent 0-hit `match_all`.
     #[test]
-    fn search_names_the_missing_or_mistyped_query() {
-        let err = build_search(&json!({ "index": "docs" })).unwrap_err();
-        assert!(
-            err.contains("`query`") && err.contains("`query_dsl`"),
-            "{err}"
+    fn search_defaults_to_match_all_and_retains_legacy_dsl() {
+        for args in [json!({}), json!({"index":"docs"}), json!({"query":null})] {
+            let (_, _, body) = built(build_search(&args));
+            assert_eq!(body["query"], json!({"match_all":{}}));
+        }
+        let clause = json!({"bool":{"filter":{"term":{"kind":"guide"}},"must_not":{"term":{"hidden":true}}}});
+        let (_, _, old) = built(build_search(
+            &json!({"index":"docs","query":clause,"size":2,"from":1}),
+        ));
+        let (_, _, new) = built(build_search(
+            &json!({"index":"docs","query_dsl":clause,"size":2,"from":1}),
+        ));
+        assert_eq!(old["query"], clause);
+        assert_eq!(
+            new, old,
+            "the new DSL field must preserve structured query semantics"
         );
+    }
 
-        let err = build_search(&json!({ "index": "docs", "query": "   " })).unwrap_err();
-        assert!(err.contains("`query_dsl`"), "{err}");
-
-        let err = build_search(&json!({
-            "index": "docs",
-            "query": { "match": { "body": "rust" } }
-        }))
-        .unwrap_err();
-        assert!(
-            err.contains("`query_dsl`") && err.contains("must be plain search text"),
-            "{err}"
-        );
-
-        let err = build_search(&json!({
-            "index": "docs",
-            "query": "rust",
-            "query_dsl": { "match_all": {} }
-        }))
-        .unwrap_err();
-        assert!(err.contains("not both"), "{err}");
-
-        let err = build_search(&json!({ "index": "docs", "query_dsl": "match_all" })).unwrap_err();
+    #[test]
+    fn search_names_mistyped_or_conflicting_query_fields() {
+        for bad in [json!("   "), json!(42), json!(false), json!([])] {
+            let err = build_search(&json!({"query":bad})).unwrap_err();
+            assert!(
+                err.contains("`query`") && err.contains("`query_dsl`"),
+                "{err}"
+            );
+        }
+        for query in [json!("rust"), json!(""), json!({"match_all":{}})] {
+            let err =
+                build_search(&json!({"query":query,"query_dsl":{"match_all":{}}})).unwrap_err();
+            assert!(err.contains("not both"), "{err}");
+        }
+        let err = build_search(&json!({"query_dsl":"match_all"})).unwrap_err();
         assert!(err.contains("must be a JSON object"), "{err}");
+    }
+
+    #[test]
+    fn search_advertises_distinct_query_types_without_removing_legacy_runtime() {
+        let specs = tool_specs_with(true);
+        let spec = specs
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "xerj_search")
+            .unwrap();
+        assert_eq!(spec["inputSchema"]["properties"]["query"]["type"], "string");
+        assert_eq!(
+            spec["inputSchema"]["properties"]["query_dsl"]["type"],
+            "object"
+        );
     }
 
     #[test]

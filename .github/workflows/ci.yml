@@ -859,6 +859,9 @@ jobs:
       - name: Local definition CLI and MCP parity
         run: python3 scripts/mcp-def-smoke.py engine/target/ci-test/xerj
 
+      - name: MCP query compatibility and default response budget
+        run: python3 scripts/mcp-search-contract-smoke.py engine/target/ci-test/xerj
+
       - name: MCP authentication discovery diagnostics
         run: python3 scripts/auth-discovery-smoke.py engine/target/ci-test/xerj
 
