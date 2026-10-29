@@ -11,7 +11,7 @@ use std::time::Duration;
 // are pinned by the `local admin-key discovery` tests at the bottom of this
 // file: they stayed here when the helpers moved to `xerj-common`, so they
 // are the shared helpers' tests wherever the helpers live.
-use xerj_common::localauth::{discover_local_admin_key_for_url, url_is_loopback};
+use xerj_common::localauth::{discover_local_admin_key_for_url_with_origin, url_is_loopback};
 
 /// Largest `--max-minutes` accepted: one week. Past that the flag is a typo,
 /// and `--max-minutes 0` already exists to mean "never ask".
@@ -1670,18 +1670,24 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     // we are talking to a server on this machine, and sending it anywhere else
     // would leak a credential to a host it does not belong to.
     if api_key.is_none() && url_is_loopback(&url) {
-        if let Some((key, path)) = discover_local_admin_key_for_url(&url) {
+        if let Some(found) = discover_local_admin_key_for_url_with_origin(&url) {
             // Announced, never silent: a blind onboarding run found this
             // fallback made success depend on the working directory, because
             // `./data/admin.key` is resolved relative to cwd. Saying which
             // file was used turns "it worked here and not there" into
-            // something the reader can see and reason about.
+            // something the reader can see and reason about; saying which
+            // discovery step found it (#2578) turns "why is it using another
+            // project's key?" into the same kind of answer.
             eprintln!(
-                "autoindex: no --api-key/XERJ_API_KEY given; using the admin key at {}",
-                path.display()
+                "autoindex: no --api-key/XERJ_API_KEY given; using the admin key at {} ({})",
+                found.path.display(),
+                found.provenance()
             );
-            api_key = Some(key);
-            api_key_file = Some(path);
+            if let Some(warning) = found.foreign_warning("--api-key or XERJ_API_KEY") {
+                eprintln!("autoindex: warning: {warning}");
+            }
+            api_key = Some(found.key);
+            api_key_file = Some(found.path);
         }
     }
 
