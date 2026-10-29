@@ -118,12 +118,16 @@ pub async fn run_batch_cli(args: &[String]) -> i32 {
         .unwrap_or_else(|| DEFAULT_XERJ_URL.into())
         .trim_end_matches('/')
         .to_string();
-    let (auth, path) = resolve_auth(opts.auth, std::env::var("XERJ_AUTH").ok(), &base_url);
-    if let Some(path) = path {
+    let (auth, found) = resolve_auth(opts.auth, std::env::var("XERJ_AUTH").ok(), &base_url);
+    if let Some(found) = found {
         eprintln!(
-            "xerj batch-search: using local admin key at {}",
-            path.display()
+            "xerj batch-search: using local admin key at {} ({})",
+            found.path.display(),
+            found.provenance()
         );
+        if let Some(warning) = found.foreign_warning("--auth") {
+            eprintln!("xerj batch-search: warning: {warning}");
+        }
     }
     let client = match node_http_builder(&base_url)
         .timeout(Duration::from_secs(30))
