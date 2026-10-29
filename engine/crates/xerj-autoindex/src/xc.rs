@@ -452,6 +452,11 @@ the list is written back into corpus.json;
 a local checkout's root .xerjignore is copied into the clone when it differs
 from the committed file (git clone drops an untracked or uncommitted one);
 a pinned --from rebuild stays exact and does not copy it, and says so;
+a local partial clone (git clone --filter=blob:none) is refused with its
+reason instead of being reported as corruption: its blobs are fetched on
+demand, so cloning from it fails inside upload-pack; index that checkout in
+place with 'xerj autoindex <path> --prefix <name>', or re-clone without
+--filter and add that;
 --from takes the corpus name from the manifest's 'corpus' field (or the
 pack's 'pack' field) unless <name> or --as overrides it; a harvested pack
 also checksum-verifies and materializes records per source; --verify-sig
@@ -986,6 +991,59 @@ fn local_checkout_root(url: &str) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
+/// Why `src` is a partial clone, if it is one (#2576).
+///
+/// `git clone --filter=blob:none` leaves the blobs outside the checked-out
+/// paths unfetched and records a promisor remote to fetch them on demand. The
+/// working tree reads normally — which is why `xerj autoindex <that path>`
+/// works — but the checkout cannot serve as a clone *source*: upload-pack has
+/// to materialize every object at the tip, cannot, and dies with
+/// `unable to read sha1 file of …` or, on newer git, "repository corruption".
+/// Neither wording says "partial clone", so a valid checkout gets reported as
+/// a damaged one.
+///
+/// Detected from the config the filter writes, not by probing for absent
+/// objects: `extensions.partialClone` on current git, `remote.origin.promisor`
+/// on older ones. Both are written at clone time, so this costs two
+/// `git config` reads and no object walk.
+fn partial_clone_cause(src: &Path) -> Option<String> {
+    let read = |key: &str| {
+        git(Some(src), &["config", "--get", key])
+            .ok()
+            .filter(|(rc, _)| *rc == 0)
+            .map(|(_, out)| out.trim().to_string())
+            .filter(|v| !v.is_empty())
+    };
+    if let Some(v) = read("extensions.partialclone") {
+        return Some(format!("extensions.partialClone={v}"));
+    }
+    match read("remote.origin.promisor") {
+        Some(v) if v == "true" => Some("remote.origin.promisor=true".to_string()),
+        _ => None,
+    }
+}
+
+/// The lines `corpus add` prints when it refuses a partial clone (#2576).
+///
+/// Split out from the loop so the wording is testable — the whole point of the
+/// issue is the message, and `eprintln!` cannot be captured in-process.
+fn partial_clone_refusal(repo_name: &str, src: &Path, cause: &str) -> Vec<String> {
+    vec![
+        format!(
+            "  [FAIL] {repo_name}: {} is a partial clone ({cause}) — its blobs are fetched on \
+             demand, so cloning from it fails with a misleading \"repository corruption\"; \
+             continuing",
+            src.display()
+        ),
+        format!(
+            "xerj corpus add:   index the working tree in place: \
+             xerj autoindex {} --prefix {repo_name}",
+            src.display()
+        ),
+        "xerj corpus add:   or re-clone it without --filter and add that checkout".to_string(),
+    ]
+}
+
 /// `file:///abs/path` → `/abs/path`. `file://localhost/abs/path` → `/abs/path`.
 fn file_url_path(rest: &str) -> Option<PathBuf> {
     let path = if rest.starts_with('/') {
@@ -1500,6 +1558,19 @@ fn run_corpus_add(args: &[String]) -> i32 {
                 own,
             );
             continue;
+        }
+        // #2576: a partial clone has no blobs outside its checked-out paths,
+        // so cloning FROM it fails inside upload-pack — with git's "repository
+        // corruption" wording, which names the wrong problem. Refuse with the
+        // reason and the two ways forward, before git prints anything at all.
+        if let Some(src) = local_checkout_root(&url) {
+            if let Some(cause) = partial_clone_cause(&src) {
+                for line in partial_clone_refusal(&repo_name, &src, &cause) {
+                    eprintln!("{line}");
+                }
+                skipped.push(repo_name);
+                continue;
+            }
         }
         println!("  [clone] {repo_name}");
         let cloned = stage_new_checkout(&target, |checkout| {
@@ -6137,7 +6208,132 @@ precedence = ["a", "b"]
         assert!(CORPUS_USAGE.contains("file classes") || CORPUS_USAGE.contains("per-file-class"));
     }
 
-    /// #2199: `git clone` of a local path checks out committed files only.
+    /// #2576: both spellings the filter writes are recognised, and a complete
+    /// checkout — even one with a remote — is not a partial clone.
+    #[test]
+    fn partial_clone_cause_reads_both_config_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("complete");
+        init_committed_repo(&repo, &[("keep.txt", "tracked\n")]);
+        let (rc, _) = git(
+            Some(&repo),
+            &["remote", "add", "origin", "https://example.com/x.git"],
+        )
+        .unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(
+            partial_clone_cause(&repo),
+            None,
+            "a full clone has no promisor"
+        );
+
+        let (rc, _) = git(Some(&repo), &["config", "remote.origin.promisor", "true"]).unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(
+            partial_clone_cause(&repo).as_deref(),
+            Some("remote.origin.promisor=true"),
+            "older git records the filter on the remote"
+        );
+
+        let (rc, _) = git(
+            Some(&repo),
+            &["config", "extensions.partialClone", "origin"],
+        )
+        .unwrap();
+        assert_eq!(rc, 0);
+        assert_eq!(
+            partial_clone_cause(&repo).as_deref(),
+            Some("extensions.partialClone=origin"),
+            "current git records it in extensions, and that is the one reported"
+        );
+    }
+
+    /// #2576: `git clone --filter=blob:none` leaves the blobs outside the
+    /// checked-out paths unfetched, so a clone *from* that checkout fails inside
+    /// upload-pack — with git's "repository corruption" wording, which names
+    /// the wrong problem and sends the reader looking for a damaged repo. The
+    /// checkout is valid: `xerj autoindex` reads it. Refuse it by name and
+    /// point at the command that works.
+    #[test]
+    fn corpus_add_refuses_a_partial_clone_by_name_instead_of_calling_it_corrupt() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(&origin, &[("src/keep.txt", "tracked\n")]);
+        let (rc, out) = git(Some(&origin), &["config", "uploadpack.allowFilter", "true"]).unwrap();
+        assert_eq!(rc, 0, "{out}");
+
+        let partial = home.path().join("partial");
+        let (rc, out) = git(
+            None,
+            &[
+                "clone",
+                "--quiet",
+                "--filter=blob:none",
+                "--sparse",
+                &format!("file://{}", origin.display()),
+                &partial.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "the fixture must clone: {out}");
+        let (rc, promisor) = git(
+            Some(&partial),
+            &["config", "--get", "remote.origin.promisor"],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "the fixture must be a partial clone: {promisor}");
+
+        // The premise, not the fix: cloning FROM it is what fails, and with a
+        // message that never says "partial".
+        let (clone_rc, clone_out) = git(
+            None,
+            &[
+                "clone",
+                "--depth",
+                "1",
+                "--quiet",
+                &partial.display().to_string(),
+                &home.path().join("would-be-clone").display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_ne!(
+            clone_rc, 0,
+            "if this ever succeeds, the guard is unnecessary: {clone_out}"
+        );
+
+        assert_eq!(
+            run_corpus_add(&["partial-corpus".into(), partial.display().to_string()]),
+            1,
+            "a corpus whose only source was refused has nothing cloned"
+        );
+        assert!(
+            !home.path().join("corpora/partial-corpus/partial").exists(),
+            "the refused source must not leave a half-clone behind"
+        );
+
+        // The message is the fix: it has to name the partial clone, name the
+        // config that proves it, and hand over a command that works. It must
+        // not repeat the two misdirections the issue was filed about.
+        let cause = partial_clone_cause(&partial).expect("the fixture is a partial clone");
+        let lines = partial_clone_refusal("partial", &partial, &cause).join("\n");
+        assert!(lines.contains("is a partial clone"), "{lines}");
+        assert!(lines.contains(&cause), "{lines}");
+        assert!(
+            lines.contains(&format!(
+                "xerj autoindex {} --prefix partial",
+                partial.display()
+            )),
+            "the refusal must hand over the command that works: {lines}"
+        );
+        assert!(!lines.contains("could not clone"), "{lines}");
+        assert!(
+            lines.contains("misleading \"repository corruption\""),
+            "the old wording is quoted only to say it is wrong: {lines}"
+        );
+    }
+
     /// An untracked root `.xerjignore` has to be copied or the index sees
     /// built-in rules alone. Re-adding refreshes it; `file://` is the same
     /// local checkout; a source with no ignore file does not gain one.
