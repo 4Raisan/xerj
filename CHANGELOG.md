@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Corpus cloning validates existing checkouts and serializes writers (#2453).
+  New checkouts are staged before publication. Ambiguous existing directories
+  are preserved for recovery rather than deleted or reset automatically.
+
 - MCP `xerj_search` advertises plain text in `query` and structured clauses
   in `query_dsl`. Legacy object-valued `query` and omitted-query browsing
   remain supported; conflicting fields fail before HTTP requests (#2549).

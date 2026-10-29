@@ -494,18 +494,11 @@ pub(crate) fn git(dir: Option<&Path>, args: &[&str]) -> Result<(i32, String)> {
     ))
 }
 
-/// Whether an existing directory can be reused as a clone of its remote.
-///
-/// `.git` appears before the first object lands, so its presence says nothing
-/// about whether the clone finished: a killed `git clone` leaves a repository
-/// with no HEAD and no files. HEAD names a commit only once the fetch and the
-/// checkout got that far (#2453).
+/// `.git` alone does not establish a completed checkout (#2453). Check the
+/// readable commit, the Git-owned index location (also for linked worktrees),
+/// and a pending index lock before reusing an existing checkout.
 fn existing_checkout_is_complete(target: &Path) -> bool {
-    if !target.join(".git").exists() {
-        return false;
-    }
-    git(Some(target), &["rev-parse", "--verify", "--quiet", "HEAD"])
-        .is_ok_and(|(rc, out)| rc == 0 && !out.is_empty())
+    target.join(".git").exists() && unfinished_clone(target).is_none()
 }
 
 /// How much of git's own stdout/stderr a fetch failure keeps. A TLS
@@ -783,6 +776,143 @@ fn paths_note(paths: &[String]) -> String {
         String::new()
     } else {
         format!(" (only {})", paths.join(", "))
+    }
+}
+
+/// Observable incomplete checkout state, never proof that files are disposable.
+#[derive(Debug)]
+enum Unfinished {
+    NoCommit,
+    Checkout,
+    Locked,
+    Unreadable(String),
+}
+
+fn unfinished_clone(target: &Path) -> Option<Unfinished> {
+    let unreadable = |out: &str| {
+        let why = out.lines().next().unwrap_or("").trim();
+        Some(Unfinished::Unreadable(if why.is_empty() {
+            "HEAD names no readable commit".to_string()
+        } else {
+            why.chars().take(200).collect()
+        }))
+    };
+    // --git-dir prevents accidentally resolving an enclosing repository;
+    // --git-path handles linked worktrees and their separate index correctly.
+    let index = match git_stdout(
+        target,
+        &["--git-dir=.git", "rev-parse", "--git-path", "index"],
+    ) {
+        Ok((0, out, _)) if !out.is_empty() => target.join(out),
+        Ok((_, _, err)) => return unreadable(&err),
+        Err(e) => return unreadable(&e.to_string()),
+    };
+    if index.with_file_name("index.lock").exists() {
+        return Some(Unfinished::Locked);
+    }
+    let rev = |spec: &str| {
+        git_stdout(
+            target,
+            &["--git-dir=.git", "rev-parse", "--verify", "--quiet", spec],
+        )
+    };
+    match rev("HEAD") {
+        Ok((0, _, _)) => {}
+        Ok((1, _, _)) => return Some(Unfinished::NoCommit),
+        Ok((_, _, err)) => return unreadable(&err),
+        Err(e) => return unreadable(&e.to_string()),
+    }
+    match rev("HEAD^{commit}") {
+        Ok((0, _, _)) => {}
+        Ok((_, _, err)) => return unreadable(&err),
+        Err(e) => return unreadable(&e.to_string()),
+    }
+    if !index.is_file() {
+        // A committed empty tree legitimately needs no worktree index on
+        // some Git versions. A nonempty tree without an index is ambiguous.
+        let empty_tree = matches!(
+            git_stdout(target, &["--git-dir=.git", "ls-tree", "--name-only", "HEAD"]),
+            Ok((0, out, _)) if out.is_empty()
+        );
+        if !empty_tree {
+            return Some(Unfinished::Checkout);
+        }
+    }
+    None
+}
+
+fn unfinished_checkout_message(target: &Path, state: &Unfinished) -> String {
+    let why = match state {
+        Unfinished::NoCommit => "HEAD has no commit".to_string(),
+        Unfinished::Checkout => "the Git index is missing".to_string(),
+        Unfinished::Locked => {
+            "Git index.lock exists; a Git operation may still be running".to_string()
+        }
+        Unfinished::Unreadable(why) => format!("Git cannot read the checkout: {why}"),
+    };
+    format!(
+        "{} is not a reusable checkout ({why}); kept its files unchanged. \
+             Wait for any active Git operation to finish. If this checkout is incomplete, \
+             move the directory to an unused backup location, then rerun this corpus add command",
+        target.display()
+    )
+}
+
+/// Publish only a successfully completed new checkout. The caller holds the
+/// corpus lock; the destination is under the operator-owned corpus directory.
+/// TemporaryDir cleans this attempt's private stage on ordinary failure. A
+/// process kill may leave a hidden stage, but never an apparent final clone.
+fn stage_new_checkout(target: &Path, clone: impl FnOnce(&Path) -> Result<()>) -> Result<()> {
+    let absent = || -> Result<()> {
+        match std::fs::symlink_metadata(target) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("cannot inspect {}", target.display())),
+            Ok(_) => anyhow::bail!("{} already exists; kept it unchanged. Move it to an unused backup location before retrying", target.display()),
+        }
+    };
+    absent()?;
+    let parent = target
+        .parent()
+        .context("checkout has no parent directory")?;
+    std::fs::create_dir_all(parent)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".xerj-clone-")
+        .tempdir_in(parent)?;
+    let checkout = stage.path().join("checkout");
+    clone(&checkout)?;
+    if !existing_checkout_is_complete(&checkout) {
+        anyhow::bail!("Git did not produce a complete checkout; final directory was not published");
+    }
+    // An external writer may have created a destination while Git ran. Do
+    // not replace it. Cooperating corpus writers are serialized by the lock.
+    absent()?;
+    std::fs::rename(&checkout, target)
+        .with_context(|| format!("cannot publish checkout at {}", target.display()))?;
+    Ok(())
+}
+
+/// One `corpus add` per corpus at a time (#2453): a second run would
+/// otherwise take the first one's clone in progress for an unfinished one.
+/// Released when the returned file is dropped.
+fn lock_corpus_add(root: &Path, name: &str) -> Result<std::fs::File> {
+    let dir = root.join("locks");
+    std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    let path = dir.join(format!("corpus-add-{name}.lock"));
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("cannot open {}", path.display()))?;
+    match fs2::FileExt::try_lock_exclusive(&file) {
+        Ok(()) => Ok(file),
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => anyhow::bail!(
+            "corpus '{name}' is being written by another `xerj corpus add` (lock: {}). \
+             Run this again when it finishes.",
+            path.display()
+        ),
+        Err(e) => Err(anyhow::Error::new(e).context(format!("cannot lock {}", path.display()))),
     }
 }
 
@@ -1200,6 +1330,13 @@ fn run_corpus_add(args: &[String]) -> i32 {
 
     let root = code_root();
     let dest = root.join("corpora").join(&name);
+    let _lock = match lock_corpus_add(&root, &name) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 1;
+        }
+    };
     // A corpus name is EITHER a cloned-repo corpus or a harvested one.
     // Cloning repos into a harvested corpus's dir would corrupt both views:
     // the manifest's pseudo-repos would sit beside real clones, and
@@ -1281,6 +1418,23 @@ fn run_corpus_add(args: &[String]) -> i32 {
                 },
             );
         };
+        // Existing state may contain local edits, even without HEAD or an
+        // index. Neither condition authorizes deletion or reset --hard.
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
+            eprintln!("  [FAIL] {repo_name}: checkout path is a symlink; kept it unchanged");
+            skipped.push(repo_name);
+            continue;
+        }
+        if target.join(".git").exists() {
+            if let Some(state) = unfinished_clone(&target) {
+                eprintln!(
+                    "  [FAIL] {repo_name}: {}; continuing",
+                    unfinished_checkout_message(&target, &state)
+                );
+                skipped.push(repo_name);
+                continue;
+            }
+        }
         if target.join(".git").exists() && !sha.is_empty() {
             let at = git(Some(&target), &["rev-parse", "HEAD"])
                 .ok()
@@ -1347,43 +1501,29 @@ fn run_corpus_add(args: &[String]) -> i32 {
             );
             continue;
         }
-        // #2453: a killed clone leaves `.git` behind with no HEAD, so the
-        // directory looked cloned forever and `corpus add` skipped it. The
-        // check above says the wreck is not reusable; clear it and clone.
-        if target.join(".git").exists() {
-            println!("  [redo] {repo_name}: clearing an incomplete clone and re-cloning");
-            if let Err(e) = std::fs::remove_dir_all(&target) {
-                eprintln!("  [FAIL] {repo_name}: cannot clear the incomplete clone: {e}");
-                skipped.push(repo_name);
-                continue;
-            }
-        }
         println!("  [clone] {repo_name}");
-        if sha.is_empty() {
-            if let Some(parent) = target.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            // Never a shell string: the URL and target are single argv
-            // elements, so a hostile URL cannot smuggle flags.
-            let target_s = target.to_string_lossy().to_string();
-            let (rc, _) = git(None, &["clone", "--depth", "1", "--quiet", &url, &target_s])
-                .unwrap_or((-1, String::new()));
-            if rc != 0 {
-                let (rc2, _) = git(None, &["clone", "--depth", "1", &url, &target_s])
-                    .unwrap_or((-1, String::new()));
-                if rc2 != 0 {
-                    eprintln!("  [FAIL] {repo_name} — could not clone; continuing");
-                    skipped.push(repo_name);
-                    continue;
+        let cloned = stage_new_checkout(&target, |checkout| {
+            if sha.is_empty() {
+                let target_s = checkout.to_string_lossy().to_string();
+                let (rc, output) = git(None, &["clone", "--depth", "1", "--", &url, &target_s])?;
+                if rc != 0 {
+                    let shown: String = output
+                        .replace(&url, "[source]")
+                        .chars()
+                        .take(GIT_FETCH_OUTPUT_CAP)
+                        .collect();
+                    anyhow::bail!("git clone failed (exit {rc}): {shown}");
                 }
+                Ok(())
+            } else {
+                println!("  [pin] {repo_name} -> {}{note}", &sha[..12.min(sha.len())]);
+                checkout_at_sha_paths(checkout, &url, &sha, &paths)
             }
-        } else {
-            println!("  [pin] {repo_name} -> {}{note}", &sha[..12.min(sha.len())]);
-            if let Err(e) = checkout_at_sha_paths(&target, &url, &sha, &paths) {
-                eprintln!("  [FAIL] {repo_name}: {e:#}; continuing");
-                skipped.push(repo_name);
-                continue;
-            }
+        });
+        if let Err(e) = cloned {
+            eprintln!("  [FAIL] {repo_name}: {e:#}; continuing");
+            skipped.push(repo_name);
+            continue;
         }
         carry_ignore(&target);
         record(
@@ -1601,6 +1741,13 @@ fn run_corpus_add_pack(
     }
     let root = code_root();
     let dest = root.join("corpora").join(&name);
+    let _lock = match lock_corpus_add(&root, &name) {
+        Ok(lock) => lock,
+        Err(e) => {
+            eprintln!("xerj corpus add: {e:#}");
+            return 1;
+        }
+    };
     // Same one-kind-per-name rule the git arm enforces, from the other side.
     let previous_own = manifest::read_corpus_manifest(&dest.join("corpus.json"))
         .ok()
@@ -5515,6 +5662,362 @@ precedence = ["a", "b"]
         sha
     }
 
+    // ── corpus add over a clone killed partway (#2453) ─────────────────────
+
+    /// Leaves `checkout` as a `git checkout` stopped partway does: no index,
+    /// with `missing` not yet written. (SIGTERM lets git remove its
+    /// `.git/index.lock`; SIGKILL leaves it, see the refusal test.)
+    fn kill_mid_checkout(checkout: &Path, missing: &str) {
+        std::fs::remove_file(checkout.join(missing)).unwrap();
+        std::fs::remove_file(checkout.join(".git/index")).unwrap();
+    }
+
+    /// An unborn checkout is preserved, then a move-aside recovery succeeds.
+    #[test]
+    fn corpus_add_preserves_an_unborn_checkout_before_manual_recovery() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/partial/widget");
+        std::fs::create_dir_all(&clone).unwrap();
+        let (rc, out) = git(Some(&clone), &["init", "--quiet"]).unwrap();
+        assert_eq!(rc, 0, "git init: {out}");
+
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            1
+        );
+        let backup = preserve_incomplete_for_retry(&clone);
+        assert!(backup.join(".git/HEAD").is_file());
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+        let recorded =
+            manifest::read_corpus_manifest(&home.path().join("corpora/partial/corpus.json"))
+                .unwrap();
+        assert_eq!(recorded.repos[0].sha, head_sha(&origin));
+        assert_eq!(recorded.repos[0].files, Some(1));
+    }
+
+    /// Missing object storage does not prove an existing directory is disposable.
+    #[test]
+    fn corpus_add_preserves_a_checkout_without_git_objects() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/partial/widget");
+        std::fs::create_dir_all(&clone).unwrap();
+        let (rc, out) = git(Some(&clone), &["init", "--quiet"]).unwrap();
+        assert_eq!(rc, 0, "git init: {out}");
+        std::fs::remove_dir_all(clone.join(".git/objects")).unwrap();
+        std::fs::write(clone.join(".git/config.lock"), "").unwrap();
+
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            1
+        );
+        let backup = preserve_incomplete_for_retry(&clone);
+        assert!(backup.join(".git/HEAD").is_file());
+        assert_eq!(
+            run_corpus_add(&["partial".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// A finished checkout is reused, but a missing index is preserved and
+    /// refused even when the remote is offline. Recovery keeps local notes.
+    #[test]
+    fn corpus_add_preserves_an_ambiguous_checkout_when_remote_is_offline() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["mid".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/mid/widget");
+        assert_eq!(add(), 0);
+
+        std::fs::write(clone.join("marker"), "kept\n").unwrap();
+        assert_eq!(add(), 0);
+        assert!(
+            clone.join("marker").exists(),
+            "a finished clone is not touched"
+        );
+
+        kill_mid_checkout(&clone, "b.txt");
+        std::fs::rename(&origin, home.path().join("gone")).unwrap();
+        assert_eq!(
+            add(),
+            1,
+            "missing index is ambiguous even when the remote is unavailable"
+        );
+        assert!(!clone.join("b.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(clone.join("marker")).unwrap(),
+            "kept\n"
+        );
+        let backup = preserve_incomplete_for_retry(&clone);
+        std::fs::rename(home.path().join("gone"), &origin).unwrap();
+        assert_eq!(add(), 0);
+        assert_eq!(std::fs::read_to_string(clone.join("b.txt")).unwrap(), "b\n");
+        assert!(
+            backup.join("marker").exists(),
+            "local files remain in the saved directory"
+        );
+        let recorded =
+            manifest::read_corpus_manifest(&home.path().join("corpora/mid/corpus.json")).unwrap();
+        // Only the committed a.txt and b.txt are in the new checkout.
+        assert_eq!(recorded.repos[0].files, Some(2));
+    }
+
+    /// A leftover `.git/index.lock` may belong to a git that is still
+    /// running, so the run fails and touches nothing. Removing a lock alone
+    /// does not authorize overwriting files when the index is still absent.
+    #[test]
+    fn corpus_add_refuses_a_checkout_left_with_index_lock() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["locked".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/locked/widget");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&clone, "b.txt");
+        std::fs::write(clone.join(".git/index.lock"), "").unwrap();
+        assert_eq!(add(), 1);
+        assert!(
+            clone.join(".git/index.lock").exists(),
+            "the lock is not deleted"
+        );
+        assert!(!clone.join("b.txt").exists());
+
+        std::fs::remove_file(clone.join(".git/index.lock")).unwrap();
+        assert_eq!(
+            add(),
+            1,
+            "removing a lock does not authorize resetting local files"
+        );
+        let backup = preserve_incomplete_for_retry(&clone);
+        assert!(backup.join("a.txt").exists());
+        assert_eq!(add(), 0);
+        assert_eq!(std::fs::read_to_string(clone.join("b.txt")).unwrap(), "b\n");
+    }
+
+    /// When the files cannot be restored the run fails and the checkout,
+    /// with every object in it, is kept for the next try.
+    #[cfg(unix)]
+    #[test]
+    fn corpus_add_keeps_a_checkout_it_cannot_restore() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("a.txt", "a\n"), ("b.txt", "b\n")]);
+        let add = || run_corpus_add(&["stuck".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/stuck/widget");
+        assert_eq!(add(), 0);
+        kill_mid_checkout(&clone, "b.txt");
+        assert_eq!(add(), 1);
+        assert!(clone.join(".git").is_dir(), "the checkout is kept");
+        assert_eq!(std::fs::read_to_string(clone.join("a.txt")).unwrap(), "a\n");
+        assert!(!clone.join("b.txt").exists());
+    }
+
+    /// A pinned checkout without HEAD is kept, not silently republished.
+    /// Moving it aside permits a fresh checkout at the declared pin.
+    #[test]
+    fn corpus_add_from_preserves_a_pin_without_head_before_recovery() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[("LICENSE", "bsd\n"), ("src/a.rs", "fn a() {}\n")],
+        );
+        let manifest = home.path().join("pin.json");
+        write_pin(
+            &manifest,
+            &origin.display().to_string(),
+            &head_sha(&origin),
+            None,
+        );
+        let add = || run_corpus_add(&["--from".into(), manifest.display().to_string()]);
+        let checkout = home.path().join("corpora/sparse-demo/vulndb");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&checkout, "src/a.rs");
+        std::fs::write(checkout.join(".git/HEAD"), "ref: refs/heads/unborn\n").unwrap();
+        assert_eq!(add(), 1);
+        assert!(checkout.join("LICENSE").is_file());
+        let backup = preserve_incomplete_for_retry(&checkout);
+        assert!(backup.join("LICENSE").is_file());
+        assert_eq!(add(), 0);
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["LICENSE".to_string(), "src/a.rs".to_string()]
+        );
+        assert!(!checkout.join(".git/index.lock").exists());
+    }
+
+    /// HEAD at the pin does not make a missing index safe to reset.
+    #[test]
+    fn corpus_add_from_preserves_a_pin_without_index_before_recovery() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[("LICENSE", "bsd\n"), ("src/a.rs", "fn a() {}\n")],
+        );
+        let manifest = home.path().join("pin.json");
+        write_pin(
+            &manifest,
+            &origin.display().to_string(),
+            &head_sha(&origin),
+            None,
+        );
+        let add = || run_corpus_add(&["--from".into(), manifest.display().to_string()]);
+        let checkout = home.path().join("corpora/sparse-demo/vulndb");
+        assert_eq!(add(), 0);
+
+        kill_mid_checkout(&checkout, "src/a.rs");
+        assert_eq!(add(), 1);
+        assert!(checkout.join("LICENSE").is_file());
+        let backup = preserve_incomplete_for_retry(&checkout);
+        assert!(backup.join("LICENSE").is_file());
+        assert_eq!(add(), 0);
+        assert_eq!(
+            worktree_files(&checkout),
+            vec!["LICENSE".to_string(), "src/a.rs".to_string()]
+        );
+    }
+
+    /// A checkout git cannot read at all (exit 128, not "no commit") is not
+    /// proof of a killed clone: the run fails and leaves it exactly as it is,
+    /// instead of recording it as already cloned. Moving it aside, as the
+    /// diagnostic advises, permits a new clone while retaining local files.
+    #[test]
+    fn corpus_add_fails_on_a_checkout_git_cannot_read() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let add = || run_corpus_add(&["odd".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/odd/widget");
+        assert_eq!(add(), 0);
+        std::fs::write(clone.join(".git/HEAD"), "garbage\n").unwrap();
+        std::fs::write(clone.join("marker"), "kept\n").unwrap();
+        assert_eq!(add(), 1);
+        assert!(
+            clone.join("marker").exists(),
+            "an unreadable checkout is not deleted"
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join(".git/HEAD")).unwrap(),
+            "garbage\n"
+        );
+
+        // The recovery keeps the old directory and all local files.
+        let backup = preserve_incomplete_for_retry(&clone);
+        assert!(backup.join("marker").exists());
+        assert_eq!(add(), 0);
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// A finished clone that lost its HEAD commit object still has its
+    /// files and index: git cannot read it, so the run fails and keeps it
+    /// instead of deleting it as a clone that never got a commit.
+    #[test]
+    fn corpus_add_fails_on_a_clone_missing_its_head_commit() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let add = || run_corpus_add(&["lost".into(), origin.display().to_string()]);
+        let clone = home.path().join("corpora/lost/widget");
+        assert_eq!(add(), 0);
+        std::fs::remove_dir_all(clone.join(".git/objects")).unwrap();
+        std::fs::create_dir(clone.join(".git/objects")).unwrap();
+        assert_eq!(add(), 1);
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "tracked\n"
+        );
+    }
+
+    /// A `.git` file (a linked worktree) has no `.git/index` of its own and
+    /// is never ours: it is left alone, not taken for an unfinished clone.
+    #[test]
+    fn corpus_add_leaves_a_linked_worktree_alone() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let clone = home.path().join("corpora/linked/widget");
+        let clone_s = clone.display().to_string();
+        let (rc, out) = git(Some(&origin), &["worktree", "add", "--quiet", &clone_s]).unwrap();
+        assert_eq!(rc, 0, "git worktree add: {out}");
+        std::fs::write(clone.join("keep.txt"), "edited\n").unwrap();
+
+        assert_eq!(
+            run_corpus_add(&["linked".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(clone.join("keep.txt")).unwrap(),
+            "edited\n"
+        );
+        assert!(clone.join(".git").is_file());
+    }
+
+    /// A second `corpus add` of the same corpus refuses while the first holds
+    /// the lock, and touches nothing.
+    #[test]
+    fn corpus_add_refuses_while_another_run_holds_the_corpus() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "tracked\n")]);
+        let held = lock_corpus_add(home.path(), "busy").unwrap();
+        assert_eq!(
+            run_corpus_add(&["busy".into(), origin.display().to_string()]),
+            1
+        );
+        assert!(!home.path().join("corpora/busy/widget").exists());
+        drop(held);
+        assert_eq!(
+            run_corpus_add(&["busy".into(), origin.display().to_string()]),
+            0
+        );
+    }
+
+    /// `corpus add --from <pack>` takes the same lock.
+    #[test]
+    fn corpus_add_from_pack_refuses_while_another_run_holds_the_corpus() {
+        let home = tempfile::tempdir().unwrap();
+        let _h = code_home(home.path());
+        let pack = build_demo_pack(home.path());
+        let add = || run_corpus_add(&["--from".to_string(), pack.display().to_string()]);
+        let held = lock_corpus_add(home.path(), "demo").unwrap();
+        assert_eq!(add(), 1);
+        assert!(!home.path().join("corpora/demo").exists());
+        drop(held);
+        assert_eq!(add(), 0);
+    }
+
     #[test]
     fn local_checkout_root_is_a_directory_or_a_file_url() {
         assert!(local_checkout_root("https://github.com/xerj-org/xerj").is_none());
@@ -6659,16 +7162,151 @@ precedence = ["a", "b"]
         assert_eq!(git(Some(&target), &["init", "--quiet"]).unwrap().0, 0);
         std::fs::write(target.join("local-note.txt"), "irreplaceable local content").unwrap();
         let code = run_corpus_add(&["preserve".into(), origin.display().to_string()]);
-        assert_eq!(std::fs::read_to_string(target.join("local-note.txt")).ok().as_deref(),
-            Some("irreplaceable local content"), "an unborn repo is not proof of disposable state");
+        assert_eq!(
+            std::fs::read_to_string(target.join("local-note.txt"))
+                .ok()
+                .as_deref(),
+            Some("irreplaceable local content"),
+            "an unborn repo is not proof of disposable state"
+        );
         assert_eq!(code, 1, "an ambiguous existing checkout must be refused");
         assert!(!home.path().join("corpora/preserve/corpus.json").exists());
         // Keeping the old directory separately makes a normal retry safe.
         let backup = home.path().join("saved-incomplete-widget");
         std::fs::rename(&target, &backup).unwrap();
-        assert_eq!(run_corpus_add(&["preserve".into(), origin.display().to_string()]), 0);
-        assert_eq!(std::fs::read_to_string(backup.join("local-note.txt")).unwrap(), "irreplaceable local content");
-        assert_eq!(std::fs::read_to_string(target.join("keep.txt")).unwrap(), "remote content\n");
+        assert_eq!(
+            run_corpus_add(&["preserve".into(), origin.display().to_string()]),
+            0
+        );
+        assert_eq!(
+            std::fs::read_to_string(backup.join("local-note.txt")).unwrap(),
+            "irreplaceable local content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "remote content\n"
+        );
     }
 
+    #[test]
+    fn corpus_add_does_not_reset_user_edits_when_index_is_missing() {
+        let home = tempfile::tempdir().unwrap();
+        let _hold = code_home(home.path());
+        let origin = home.path().join("widget");
+        init_committed_repo(&origin, &[("keep.txt", "remote content\n")]);
+        let args = vec!["preserve".into(), origin.display().to_string()];
+        assert_eq!(run_corpus_add(&args), 0);
+        let target = home.path().join("corpora/preserve/widget");
+        let manifest = home.path().join("corpora/preserve/corpus.json");
+        let before = std::fs::read(&manifest).unwrap();
+        std::fs::write(target.join("keep.txt"), "irreplaceable local edit").unwrap();
+        std::fs::remove_file(target.join(".git/index")).unwrap();
+        let code = run_corpus_add(&args);
+        assert_eq!(
+            std::fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "irreplaceable local edit",
+            "missing index does not authorize reset --hard"
+        );
+        assert_eq!(code, 1);
+        assert_eq!(std::fs::read(&manifest).unwrap(), before);
+    }
+
+    fn preserve_incomplete_for_retry(checkout: &Path) -> PathBuf {
+        let backup = checkout.with_extension("saved");
+        assert!(!backup.exists());
+        std::fs::rename(checkout, &backup).unwrap();
+        backup
+    }
+
+    #[test]
+    fn staged_clone_failure_never_publishes_a_partial_checkout() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("repo");
+        let error = stage_new_checkout(&target, |stage| {
+            assert!(!target.exists());
+            std::fs::create_dir_all(stage)?;
+            std::fs::write(stage.join("partial.txt"), "partial")?;
+            anyhow::bail!("injected clone failure")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("injected clone failure"));
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 0);
+        stage_new_checkout(&target, |stage| {
+            assert!(!target.exists());
+            init_committed_repo(stage, &[("complete.txt", "complete\n")]);
+            Ok(())
+        })
+        .unwrap();
+        assert!(existing_checkout_is_complete(&target));
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn staged_clone_does_not_replace_a_destination_created_during_clone() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("repo");
+        let error = stage_new_checkout(&target, |stage| {
+            init_committed_repo(stage, &[("remote.txt", "remote\n")]);
+            std::fs::create_dir(&target)?;
+            std::fs::write(target.join("local.txt"), "local content")?;
+            Ok(())
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+        assert_eq!(
+            std::fs::read_to_string(target.join("local.txt")).unwrap(),
+            "local content"
+        );
+        assert!(!target.join("remote.txt").exists());
+        assert_eq!(std::fs::read_dir(home.path()).unwrap().count(), 1);
+        let error = stage_new_checkout(&target, |_| {
+            panic!("existing destination must be refused before cloning")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("already exists"));
+    }
+
+    #[test]
+    fn corpus_failed_new_clone_can_be_retried_without_deleting_anything() {
+        let home = tempfile::tempdir().unwrap();
+        let _hold = code_home(home.path());
+        let origin = home.path().join("widget");
+        let args = vec!["retry".into(), origin.display().to_string()];
+        assert_eq!(run_corpus_add(&args), 1);
+        let corpus = home.path().join("corpora/retry");
+        assert_eq!(std::fs::read_dir(&corpus).unwrap().count(), 0);
+        init_committed_repo(&origin, &[("complete.txt", "complete\n")]);
+        assert_eq!(run_corpus_add(&args), 0);
+        assert!(corpus.join("widget/complete.txt").is_file());
+        assert!(corpus.join("corpus.json").is_file());
+    }
+
+    #[test]
+    fn a_committed_empty_tree_is_a_reusable_checkout() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("empty");
+        std::fs::create_dir(&repo).unwrap();
+        assert_eq!(git(Some(&repo), &["init", "--quiet"]).unwrap().0, 0);
+        assert_eq!(
+            git(
+                Some(&repo),
+                &[
+                    "-c",
+                    "user.name=xerj-test",
+                    "-c",
+                    "user.email=xerj-test@example.com",
+                    "commit",
+                    "--allow-empty",
+                    "--quiet",
+                    "-m",
+                    "empty"
+                ]
+            )
+            .unwrap()
+            .0,
+            0
+        );
+        assert!(existing_checkout_is_complete(&repo));
+    }
 }
