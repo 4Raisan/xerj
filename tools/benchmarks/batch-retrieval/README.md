@@ -197,3 +197,18 @@ this review. The receipt retains the observed timings, but this run does not
 isolate a version, platform, or throughput improvement. Wrong-archive and
 existing-output CLI controls also failed before publication, with exit 1 and
 exit 2 respectively; the existing-output sentinel remained unchanged.
+
+## Default-budget compatibility verification: 2026-10-29
+
+[Protocol v2 Linux receipts](results/2026-10-29-linux-x86_64-budget-v2.json)
+use the explicit 1,000,000-word allowance in every arm, with the reviewed
+MCP/default-budget build at `a89b55bb0`. All four arms passed 49/49 valid
+retrieval items in each of five measured repeats and retained the separate
+expected item error. Ranked evidence and citations matched across arms and
+transports. No response budget bound, and the node retained 2,051 documents
+through graceful restart.
+
+The earlier receipts remain unchanged. Protocol v2 adds an explicit request
+field, so its payload token counts are not interchangeable with those earlier
+runs. This shared Linux host was also running validation; these observations
+verify compatibility and full evidence, not an isolated performance gain.

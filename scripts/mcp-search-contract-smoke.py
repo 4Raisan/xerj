@@ -33,7 +33,14 @@ def main():
 
         def do_GET(self):
             requests.append(("GET", self.path, None))
-            self.respond({"docs": {"mappings": {"properties": {"body": {"type": "text"}}}}})
+            if self.path == "/":
+                self.respond({"version": {"number": "8.13.0"}, "cluster_name": "fixture"})
+            elif self.path == "/_cluster/health":
+                self.respond({"status": "green", "number_of_nodes": 1})
+            elif self.path.startswith("/_cat/indices?"):
+                self.respond([{"index": "docs", "docs.count": str(len(hits))}])
+            else:
+                self.respond({"docs": {"mappings": {"properties": {"body": {"type": "text"}}}}})
 
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
@@ -46,12 +53,12 @@ def main():
         thread.start()
         url = f"http://127.0.0.1:{server.server_port}"
 
-        def call(args):
+        def call(args, name="xerj_search"):
             requests.clear()
             messages = [
                 {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
                 {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
-                    "name": "xerj_search", "arguments": args}},
+                    "name": name, "arguments": args}},
             ]
             run = subprocess.run([binary, "mcp", "--url", url, "--auth", "ApiKey fixture",
                                   "--disable-feedback"], text=True, capture_output=True,
@@ -98,6 +105,14 @@ def main():
                 accounting = response["_token_budget"]
                 assert accounting["max_tokens"] == 8000 and accounting["tokens_used"] <= 8000, accounting
             print("PASS absent/null budget applies 8000 words with explicit trimming accounting")
+
+            result = call({}, name="xerj_status")
+            assert result["isError"] is False, result
+            text = result["content"][0]["text"]
+            assert "docs  20 docs" in text and "autoindex catalog: ABSENT" in text, text
+            assert "nothing indexed" not in text, text
+            assert len(requests) == 3 and all(r[0] == "GET" for r in requests), requests
+            print("PASS status tool dispatch reports ordinary indexed data without a catalog")
         finally:
             server.shutdown()
             thread.join(timeout=5)
