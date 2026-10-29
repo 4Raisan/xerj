@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj autoindex` now says why a source file over the 2 MiB code cap is
+  skipped (#2483). Such a file (generated stubs, minified bundles) used to be
+  reported as "no records extracted (code candidate family, 1 junk lines)",
+  which read like a parse failure. The reason now names the cap, the file
+  size, and `.xerjignore` as the way to leave it out of the plan.
+
 - `_reindex` honours `dest.op_type: create`, `conflicts`, and `max_docs`
   instead of silently dropping them. `create` no longer overwrites an
   existing destination document: the default abort returns 409 with ES's

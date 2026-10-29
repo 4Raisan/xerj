@@ -32,6 +32,22 @@ use tree_sitter::{Language, Node, Parser, Query, QueryCursor};
 /// couple MB a single "file" is not human code and only bloats the index.
 const CODE_CAP: u64 = 2 << 20;
 
+/// The reason a source file over [`CODE_CAP`] is skipped (#2483). It names
+/// the cap and the file's size, says the run is otherwise unaffected, and
+/// points at `.xerjignore` so the next plan leaves the file out by name.
+fn code_cap_refusal(path: &Path) -> String {
+    let mib = |b: u64| b as f64 / (1u64 << 20) as f64;
+    let size = std::fs::metadata(path)
+        .map(|m| format!("{:.1} MiB", mib(m.len())))
+        .unwrap_or_else(|_| "size unknown".into());
+    format!(
+        "source file over the {:.0} MiB code cap ({size}): too large to be hand-written \
+         code (generated stubs, minified bundles), so it is not parsed. The rest of the \
+         run is unaffected. To leave it out of the plan, add its path to .xerjignore",
+        mib(CODE_CAP)
+    )
+}
+
 struct LangDef {
     name: &'static str,
     exts: &'static [&'static str],
@@ -367,6 +383,9 @@ pub fn extract(path: &Path, sn: &crate::sniff::Sniffed, sink: Sink) -> Result<Ex
     }
     let Some(bytes) = super::read_whole(path, false, CODE_CAP)? else {
         stats.junk += 1;
+        // #2483: say why. The generic "no records extracted (code candidate
+        // family, 1 junk lines)" read like a parse failure, not a size cap.
+        stats.refusal = Some(code_cap_refusal(path));
         return Ok(stats);
     };
     let (text, _) = crate::sniff::decode_text(&bytes);
@@ -2463,6 +2482,41 @@ mod tests {
         for name in registry().iter().map(|d| d.name) {
             assert_eq!(canonical_language(name), Some(name));
         }
+    }
+
+    /// #2483: a generated source file over the code cap is skipped with a
+    /// reason that names the cap and the fix, not "no records extracted".
+    #[test]
+    fn an_oversized_source_file_is_refused_with_the_cap_and_the_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("Service.java");
+        let mut src = String::from("public final class Service {\n");
+        let mut i = 0;
+        while (src.len() as u64) <= CODE_CAP {
+            src.push_str(&format!("  public int getField{i}() {{ return {i}; }}\n"));
+            i += 1;
+        }
+        src.push_str("}\n");
+        std::fs::write(&f, &src).unwrap();
+        let sn = crate::sniff::sniff_with_name(&f, Path::new("Service.java")).unwrap();
+        let mut records = 0;
+        let stats = extract(&f, &sn, &mut |_| {
+            records += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(records, 0);
+        let reason = stats.refusal.expect("an oversized file names its refusal");
+        assert!(reason.contains("2 MiB code cap"), "{reason}");
+        assert!(reason.contains(".xerjignore"), "{reason}");
+
+        // Under the cap, the same shape is parsed and refuses nothing.
+        let small = dir.path().join("Small.java");
+        std::fs::write(&small, "public class Small {\n  int f() { return 1; }\n}\n").unwrap();
+        let sn = crate::sniff::sniff_with_name(&small, Path::new("Small.java")).unwrap();
+        let stats = extract(&small, &sn, &mut |_| true).unwrap();
+        assert!(stats.refusal.is_none());
+        assert!(stats.records > 0);
     }
 
     fn syms(lang: &str, src: &str) -> Vec<Symbol> {
