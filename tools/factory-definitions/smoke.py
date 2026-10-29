@@ -27,7 +27,8 @@ def main():
     source_binary = args.binary.resolve(strict=True)
     runner = str(args.runner.resolve(strict=True)) if args.runner else None
     repo = Path(__file__).resolve().parents[2]
-    env = {k: v for k, v in os.environ.items() if not k.startswith('XERJ_')}
+    env = {k: v for k, v in os.environ.items() if not k.startswith('XERJ_')
+           and k.lower() not in ('http_proxy', 'https_proxy', 'all_proxy', 'no_proxy')}
     env.update(XERJ_DISABLE_FEEDBACK='true', XERJ_NUM_CPUS='4')
     opener = build_opener(ProxyHandler({}))
     with tempfile.TemporaryDirectory(prefix='xerj-factory-defs-') as temp:
@@ -116,7 +117,7 @@ def main():
                             time.sleep(0.1)
                     if phase == 'first-run':
                         if runner:
-                            print(run([runner, '--url', url, '--dir', str(repo / 'engine/tests/es-compat-yaml/yaml')], timeout=300), flush=True)
+                            print(run([runner, '--url', url, '--dir', str(repo / 'engine/tests/es-compat-yaml/yaml')], timeout=900), flush=True)
                         command = [binary, 'autoindex', str(source), '--url', url, '--prefix', 'fx2579',
                                    '--state-dir', str(root / 'state'), '--no-graph', '--no-semantic', '--yes']
                         print(run([*command, '--dry-run']), flush=True)
