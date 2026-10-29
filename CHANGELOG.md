@@ -35,6 +35,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TS/JS factory constants exported by a separate local export clause or
+  default identifier now get definition records at their declaration lines
+  (refs #2579). Inline `export const` stays supported; private constants,
+  function-local bindings, type-only exports and remote re-exports stay out.
+  Existing unchanged files need re-extraction to gain these definitions.
+
 - Corpus cloning validates existing checkouts and serializes writers (#2453).
   New checkouts are staged before publication. Ambiguous existing directories
   are preserved for recovery rather than deleted or reset automatically.
