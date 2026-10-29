@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Offline `xerj sessions import --format codex` exports a documented subset
+  of one archived Codex rollout through the existing text redactor. It skips
+  tools and reasoning, retains physical source locations and archive event
+  identities, and refuses unsupported formats without publishing output.
+
 - Corpus Hub manifest `paths` entries may name regular files as well as
   directories (#2486). A file selection checks out that file without its
   siblings; symlinks and submodules are refused.
