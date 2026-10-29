@@ -689,22 +689,17 @@ pub fn help_text_with(feedback: bool) -> String {
          \n\
          RESUME POLICY:\n\
          \x20\x20\x20\x20{resume_policy_help}.\n\
-         \x20\x20\x20\x20On a graph-enabled or pre-generation journal the durable plan supports no-op\n\
-         \x20\x20\x20\x20resume and same-path content replacement. Files added after that plan was frozen\n\
-         \x20\x20\x20\x20are reported as skipped and are not indexed; --fresh rebuilds the plan in place\n\
-         \x20\x20\x20\x20and picks them up. Removing an indexed file is refused there before any remote\n\
-         \x20\x20\x20\x20mutation: its documents are already live and nothing on that path deletes them.\n\
-         \x20\x20\x20\x20Restore the file and rerun, or rebuild — in place by deleting the published\n\
-         \x20\x20\x20\x20indices and the state directory, or isolated under a new --state-dir, --prefix\n\
-         \x20\x20\x20\x20and --brain (or --no-graph), validated before you switch readers.\n\
-         \x20\x20\x20\x20--fresh is not a destination wipe. A file that is still present and whose\n\
-         \x20\x20\x20\x20content key changed is republished, and the documents previously published\n\
-         \x20\x20\x20\x20for that path are removed. A disappeared file is still refused before any\n\
-         \x20\x20\x20\x20remote mutation, and its documents stay. --fresh is refused outright once a\n\
-         \x20\x20\x20\x20durable corpus generation exists (re-run without it — the generated path\n\
-         \x20\x20\x20\x20reconciles the change incrementally). For an independent rebuild use a new\n\
-         \x20\x20\x20\x20--state-dir and a new --prefix, plus a new --brain when graph is enabled\n\
-         \x20\x20\x20\x20(or --no-graph).\n\
+         \x20\x20\x20\x20On a graph-enabled journal, unchanged runs and same-path replacements\n\
+         \x20\x20\x20\x20reuse the durable plan. Added files that fit a frozen dataset are indexed;\n\
+         \x20\x20\x20\x20files needing a new dataset report exit 3, stale-resume-plan and ok=false.\n\
+         \x20\x20\x20\x20Use --fresh to rebuild that graph plan and include them. Removed files\n\
+         \x20\x20\x20\x20are swept with reason=files-removed. A wider exclusion rule requires\n\
+         \x20\x20\x20\x20--drop-indexed approval before its previously indexed documents are swept.\n\
+         \x20\x20\x20\x20--fresh is not a destination wipe. It is refused once a durable corpus\n\
+         \x20\x20\x20\x20generation exists: rerun without it to reconcile changes incrementally.\n\
+         \x20\x20\x20\x20A pre-generation --no-graph journal needs an isolated rebuild under a new\n\
+         \x20\x20\x20\x20--state-dir and --prefix. For any independent graph rebuild also use a new\n\
+         \x20\x20\x20\x20--brain (or --no-graph).\n\
          \x20\x20\x20\x20Validate before switching readers; explicitly clean the shared\n\
          \x20\x20\x20\x20autoindex-catalog and old target only after validation.\n\
          \n\
