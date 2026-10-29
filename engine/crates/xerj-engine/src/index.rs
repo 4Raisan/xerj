@@ -24248,6 +24248,58 @@ impl Index {
                         uncollected,
                     )
                 }
+            } else if let Some((bf_field, bf_text, bf_must, bf_gate)) =
+                bool_filter_mem_fts_must(query)
+            {
+                // #2403: `bool{must:[match], filter|must_not:[..]}` used to
+                // fall through to the stored-doc scan, which scored every
+                // buffered match with the IDF-less `1 + ln(1 + tf)` while the
+                // bare `match` took the BM25 arm below, so the ranking changed
+                // at flush. `filter` and `must_not` are non-scoring
+                // (`BooleanClause.isScoring()`, BooleanClause.java:84-87), so
+                // score the `must` clause through the SAME memtable BM25 path
+                // the bare `match` takes, then keep only the hits the gate
+                // admits. UNCAPPED: the gate runs after scoring, so a capped
+                // list could drop a hit the gate would keep, and the consume
+                // arm's ghost-window liveness filter needs every hit anyway.
+                let mut field_boosts: std::collections::HashMap<String, f32> =
+                    std::collections::HashMap::new();
+                collect_field_boosts(bf_must, &mut field_boosts);
+                let mem_stats = collection_stats();
+                let (hits, _) = mem.search_text_boosted_with_total_using(
+                    bf_text,
+                    &[bf_field],
+                    usize::MAX,
+                    &field_boosts,
+                    mem_stats.as_deref(),
+                );
+                // Same conservative `_id` detection as the doc-scan arm: only
+                // a gate that can read `_id` pays for injecting it.
+                let gate_may_read_id: bool = serde_json::to_string(&bf_gate)
+                    .map(|s| s.contains("_id") || s.contains("Ids") || s.contains("ids"))
+                    .unwrap_or(true);
+                let kept: Vec<(String, f32)> = hits
+                    .into_iter()
+                    .filter(|h| {
+                        let Some(source) = mem.get_doc_source_arc(&h.doc_id) else {
+                            return false;
+                        };
+                        if !gate_may_read_id || source.get("_id").is_some() {
+                            return doc_matches_query_typed(&bf_gate, &source, &dmq_schema);
+                        }
+                        let mut with_id = (*source).clone();
+                        if let Some(obj) = with_id.as_object_mut() {
+                            obj.insert("_id".to_string(), Value::String(h.doc_id.clone()));
+                        }
+                        doc_matches_query_typed(&bf_gate, &with_id, &dmq_schema)
+                    })
+                    .map(|h| (h.doc_id, h.score))
+                    .collect();
+                if kept.is_empty() {
+                    MemSnapshot::Empty
+                } else {
+                    MemSnapshot::FtsHits(kept, 0)
+                }
             } else if is_doc_scan_query(query) {
                 // count_only + Term/Range short-circuits BEFORE
                 // `try_doc_values_query` because the DV-term path walks
@@ -31994,9 +32046,16 @@ impl Index {
         // any token the segment projection never named (per-field analyzers
         // can differ) joins `pairs` and gets its segment-side df in the single
         // pass below, instead of the memtable silently keeping a local df.
+        // A filtered `bool` (#2403) has no query text of its own, but its
+        // memtable arm scores the one `must` match: count that clause, or a
+        // mixed index scores its segment hits against a union that left the
+        // unflushed docs out.
+        let mem_text = match bool_filter_mem_fts_must(query) {
+            Some((_, text, _, _)) => Some(text.to_string()),
+            None => extract_query_text(query),
+        };
         let mem_stats: Option<xerj_fts::CollectionStats> = if mem_doc_count > 0 {
-            extract_query_text(query)
-                .and_then(|text| self.memtable.collection_stats(&text, &field_refs))
+            mem_text.and_then(|text| self.memtable.collection_stats(&text, &field_refs))
         } else {
             None
         };
@@ -49701,6 +49760,57 @@ fn dis_max_mem_fts_subs(q: &QueryNode) -> Option<(Vec<(&str, &str, f32)>, f32)> 
             .map(|subs| (subs, *tie_breaker)),
         _ => None,
     }
+}
+
+/// The lone `must` match's `(field, query)` and the non-scoring gate of a
+/// `bool{must:[match], filter:[..], must_not:[..]}` whose `must` clause would
+/// take the standalone-`Match` memtable FTS arm on its own (#2403): same
+/// carve-outs as that arm (`is_doc_scan_query` and `extract_query_text`), no
+/// per-query `analyzer`, no `should`, no `minimum_should_match`, and at least
+/// one `filter` or `must_not` clause (a lone `must` is already erased by
+/// `unwrap_single_clause_bool`). The gate is a `bool` holding only the
+/// `filter` and `must_not` clauses, evaluated per hit by the stored-doc
+/// matcher, so membership stays what the doc-scan route enforced. Any other
+/// shape answers `None` and keeps its existing route.
+fn bool_filter_mem_fts_must(q: &QueryNode) -> Option<(&str, &str, &QueryNode, QueryNode)> {
+    let QueryNode::Bool {
+        must,
+        should,
+        must_not,
+        filter,
+        minimum_should_match: None,
+    } = q
+    else {
+        return None;
+    };
+    if must.len() != 1 || !should.is_empty() || (filter.is_empty() && must_not.is_empty()) {
+        return None;
+    }
+    let clause = &must[0];
+    // A per-query `analyzer` declines: the memtable FTS path tokenizes with
+    // the index default, while the stored-doc matcher and the segment
+    // projection honour it, so taking this arm would change the hit set at
+    // flush.
+    let QueryNode::Match {
+        field,
+        query,
+        analyzer: None,
+        ..
+    } = clause
+    else {
+        return None;
+    };
+    if is_doc_scan_query(clause) || extract_query_text(clause).is_none() {
+        return None;
+    }
+    let gate = QueryNode::Bool {
+        must: Vec::new(),
+        should: Vec::new(),
+        must_not: must_not.clone(),
+        filter: filter.clone(),
+        minimum_should_match: None,
+    };
+    Some((field.as_str(), query.as_str(), clause, gate))
 }
 
 /// Erase `bool` wrappers whose only clause is a single SCORING clause.

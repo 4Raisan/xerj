@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Boolean text queries with one `must` match now keep `filter` and `must_not`
+  clauses non-scoring before a flush and on mixed memory/segment indices.
+  Their retained hits use the same BM25 scores as the bare match (#2403).
+
 - Reindex preflights every source alias member before creating or writing the
   destination. Aliases cannot hide a source/destination overlap; a missing
   source, invalid query or source flush failure leaves destination data intact.
