@@ -859,6 +859,9 @@ jobs:
       - name: Local definition CLI and MCP parity
         run: python3 scripts/mcp-def-smoke.py engine/target/ci-test/xerj
 
+      - name: MCP authentication discovery diagnostics
+        run: python3 scripts/auth-discovery-smoke.py engine/target/ci-test/xerj
+
       # Drives the demo/usecases scripts themselves, so the thing CI gates is
       # the same thing a reader runs. No browser, no model, no network.
       - name: Use-case smoke (brain transcript, MCP tools, autoindex discovery)
