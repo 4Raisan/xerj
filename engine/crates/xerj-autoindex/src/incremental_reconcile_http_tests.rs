@@ -7238,6 +7238,22 @@ mod delete_gate {
             after.iter().all(|path| !path.ends_with("rows.csv")),
             "the confirmed plan removes the csv: {after:?}"
         );
+
+        // A repeated confirmed exclusion, then excluding everything, must not
+        // be mistaken for a lost destination merely because the journal keeps
+        // the old per-file completion records.
+        let mut repeat = graph_cfg();
+        repeat.budget_plan = Some("code-and-docs".into());
+        repeat.drop_indexed = true;
+        assert_eq!(run_index(repeat).unwrap(), 0);
+        assert_eq!(paths(&endpoint.data_docs()), after);
+        fs::write(corpus.path().join(".xerjignore"), "*\n").unwrap();
+        assert_eq!(run_index(graph_cfg()).unwrap(), 0);
+        assert!(
+            paths(&endpoint.data_docs()).is_empty(),
+            "all source-file records were deliberately excluded: {:?}",
+            paths(&endpoint.data_docs())
+        );
     }
 
     fn base() -> CommittedManifest {

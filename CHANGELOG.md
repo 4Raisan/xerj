@@ -50,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   have their own provenance, and MCP guidance names `XERJ_AUTH`. Discovery
   priority and explicit credential overrides are unchanged.
 
+- `xerj autoindex` fails a run when one dataset index holds no documents
+  although the journal says records were written to it, even when the other
+  datasets are live (#2407, defect 2). The check summed live documents over
+  every dataset, so a populated `-json` index let a re-run print `ok: indexed
+  and searchable` over an empty `-docs` index. The error names each empty
+  index and its contributing files; record totals are reported only when
+  those files target that dataset alone. Unknown sibling counts do not hide
+  independently confirmed missing data.
 - SQL source extraction no longer slices statement heads inside a UTF-8
   character, so unrecognized CJK statement/comment heads do not panic (#2547).
 - Short Markdown files with YAML frontmatter retain their prose body even
