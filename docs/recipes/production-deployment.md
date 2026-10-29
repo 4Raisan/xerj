@@ -573,7 +573,7 @@ Elasticsearch**, use the scroll + bulk pattern below.
 **fails loud** instead of silently doing the wrong thing (verified):
 
 ```bash
-curl -k -H "Authorization: ApiKey $KEY" -X POST https://xerj:9200/_reindex -d '{
+curl -k -H "Authorization: ApiKey $KEY" -H "Content-Type: application/json" -X POST https://xerj:9200/_reindex -d '{
   "source": { "remote": { "host": "http://old-es:9200" }, "index": "src" },
   "dest":   { "index": "dst" } }'
 # HTTP 400
