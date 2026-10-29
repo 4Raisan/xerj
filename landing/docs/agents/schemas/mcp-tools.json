@@ -731,6 +731,10 @@
           "confirm": {
             "type": "boolean",
             "description": "Delete what the plan lists. false, or omitted, prints the plan and deletes nothing."
+          },
+          "uncataloged": {
+            "type": "boolean",
+            "description": "Only when the plan says the prefix has no catalog run and no resume journal and lists `uncataloged` indices (a build that never reached finalize): include those live `<prefix>-*` indices in the plan. They are deleted only with `confirm: true`."
           }
         },
         "required": [

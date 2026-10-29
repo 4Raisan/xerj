@@ -13120,6 +13120,7 @@ fn run_remove(cfg: cli::RemoveCfg) -> Result<i32> {
         yes: cfg.yes,
         prompt,
         state_dir: cfg.state_dir,
+        uncataloged: cfg.uncataloged,
     })?;
     println!(
         "{}",

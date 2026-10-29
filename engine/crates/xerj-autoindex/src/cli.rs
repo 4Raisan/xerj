@@ -208,6 +208,9 @@ pub struct RemoveCfg {
     /// When set, `remove` also deletes `journal.ndjson` here. The default
     /// journal for the selected folder is deleted either way.
     pub state_dir: Option<PathBuf>,
+    /// `--uncataloged`: when the prefix has no catalog run and no resume
+    /// journal, delete the live `<prefix>-*` indices nothing names (#2405).
+    pub uncataloged: bool,
 }
 
 /// `xerj autoindex s3://bucket/prefix --watch`: poll a bucket and emit a change
@@ -314,7 +317,7 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20--dry-run`: walk, sniff, infer, print the plan.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Nothing is written to an index. With no\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20folder, `map` reads the catalog on --url\n\
-         \x20\x20\x20\x20xerj autoindex remove --prefix <P> [--root <DIR>] [--yes]\n\
+         \x20\x20\x20\x20xerj autoindex remove --prefix <P> [--root <DIR>] [--uncataloged] [--yes]\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20list one folder's indices and catalog rows,\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20then delete them. Nothing is deleted without\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20--yes or a terminal y. Another folder under\n\
@@ -322,6 +325,10 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20build of this folder left, with no catalog run, is\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20included. A cataloged index another folder still names\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is left in place.\n\
+\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20With --uncataloged, a prefix with no catalog run\n\
+\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20and no resume journal (a build that never reached\n\
+\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20finalize, its journal gone) drops the live <P>-*\n\
+\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20indices that no catalog row names.\n\
          \x20\x20\x20\x20xerj autoindex status [OPTIONS]       resume-journal + index progress view\n\
          \x20\x20\x20\x20xerj autoindex s3://bucket/prefix --watch [OPTIONS]\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20poll object storage and emit a change feed\n\
@@ -961,6 +968,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
     // is not a confirmation for `autoindex remove`.
     let mut yes_flag = false;
     let mut remove_root: Option<String> = None;
+    let mut remove_uncataloged = false;
     let mut markdown = false;
     let mut code_analyzer_explicit = false;
     let mut max_index_bytes: Option<u64> = None;
@@ -1242,6 +1250,12 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                     .ok_or("--code-analyzer needs a value: standard or code")?;
                 code_analyzer = crate::infer::CodeAnalyzer::parse(&raw)?;
                 code_analyzer_explicit = true;
+            }
+            "--uncataloged" => {
+                if remove_uncataloged {
+                    return Err("--uncataloged was given twice".into());
+                }
+                remove_uncataloged = true;
             }
             "--root" => {
                 let raw = it
@@ -1894,6 +1908,14 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
         })));
     }
 
+    if remove_uncataloged && sub.as_deref() != Some("remove") {
+        return Err(
+            "--uncataloged selects the uncataloged indices `autoindex remove` drops. It is only \
+             supported with `autoindex remove --prefix <P> --uncataloged`."
+                .into(),
+        );
+    }
+
     if remove_root.is_some() && sub.as_deref() != Some("remove") {
         return Err(
             "--root names the folder `autoindex remove` drops. It is only supported with \
@@ -1914,6 +1936,7 @@ pub fn parse(args: Vec<String>) -> Result<Cmd, String> {
                 quiet,
                 xerj_url_note,
                 state_dir: state_dir.clone(),
+                uncataloged: remove_uncataloged,
             },
             prefix_explicit,
             approve_set: approve.is_some(),
@@ -3109,6 +3132,20 @@ mod tests {
             Some(std::path::Path::new("/tmp/j"))
         );
         assert!(err(&["data", "--root", "/tmp/a"]).contains("only supported with"));
+        // #2405: the uncataloged opt-in parses for remove and only for remove.
+        let cfg = match parse(
+            ["remove", "--prefix", "proj", "--uncataloged", "--yes"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        )
+        .unwrap()
+        {
+            Cmd::Remove(cfg) => cfg,
+            other => panic!("expected remove, got {other:?}"),
+        };
+        assert!(cfg.uncataloged);
+        assert!(err(&["data", "--uncataloged"]).contains("only supported with"));
         assert!(err(&["remove", "--prefix", "proj", "--approve", "proceed"]).contains("--yes"));
         assert!(super::help_text().contains("autoindex remove"));
     }

@@ -1431,6 +1431,10 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                     "confirm": {
                         "type": "boolean",
                         "description": "Delete what the plan lists. false, or omitted, prints the plan and deletes nothing."
+                    },
+                    "uncataloged": {
+                        "type": "boolean",
+                        "description": "Only when the plan says the prefix has no catalog run and no resume journal and lists `uncataloged` indices (a build that never reached finalize): include those live `<prefix>-*` indices in the plan. They are deleted only with `confirm: true`."
                     }
                 },
                 "required": ["prefix"]
@@ -3121,6 +3125,16 @@ async fn run_autoindex_remove(ctx: &Ctx, args: &Value) -> Value {
         Some(Value::Bool(true)) => true,
         Some(_) => return tool_text("xerj_autoindex_remove: `confirm` must be a boolean", true),
     };
+    let uncataloged = match args.get("uncataloged") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => false,
+        Some(Value::Bool(true)) => true,
+        Some(_) => {
+            return tool_text(
+                "xerj_autoindex_remove: `uncataloged` must be a boolean",
+                true,
+            )
+        }
+    };
     let url = ctx.base_url.clone();
     let api_key = api_key_from_header(ctx.auth.clone());
     let joined = tokio::task::spawn_blocking(move || {
@@ -3132,6 +3146,7 @@ async fn run_autoindex_remove(ctx: &Ctx, args: &Value) -> Value {
             yes: confirm,
             prompt: false,
             state_dir: None,
+            uncataloged,
         })
     })
     .await;
