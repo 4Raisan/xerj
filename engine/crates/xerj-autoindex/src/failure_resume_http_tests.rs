@@ -1618,6 +1618,7 @@ fn a_resume_whose_plan_predates_new_files_reports_a_stale_plan_not_junk() {
         "{done}"
     );
     assert!(!done.contains("reason=completed-with-junk"), "{done}");
+    assert!(done.contains("ok=false"), "{done}");
     {
         let locked = endpoint.state.lock().unwrap();
         let live: Vec<&str> = locked
@@ -1659,7 +1660,9 @@ fn a_resume_whose_plan_predates_new_files_reports_a_stale_plan_not_junk() {
         .unwrap_or_else(|| panic!("no JSON done event:\n{stream}"));
     assert_eq!(done["exit"], 3, "{done}");
     assert_eq!(done["reason"], "stale-resume-plan", "{done}");
-    assert_eq!(done["ok"], true, "{done}");
+    // #2411: a completed run over a stale plan does not include these files.
+    // Other partial outcomes have their own fields; ok is not a coverage proof.
+    assert_eq!(done["ok"], false, "{done}");
     assert_eq!(done["skipped_appeared"], 2, "{done}");
     assert_eq!(
         done["skipped_appeared_files"],

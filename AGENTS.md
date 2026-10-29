@@ -127,7 +127,9 @@ usage · `1` any error at all (read the `error:` line before acting) · `4`
 needs a decision (gate above; answer with `--approve`, never a retry). Exit `3`
 also carries `reason=catalog-alias-sweep-failed`: the corpus **is** indexed and
 the journal committed, and only the catalog's duplicate-alias cleanup could not
-run — read `reason`, not the bare code, to tell the two apart. Exit `3` can
+run — read `reason`, not the bare code, to tell the two apart. Exit `3` with `reason=stale-resume-plan` instead carries `ok=false`: files
+added after the plan was frozen were not indexed. Read `skipped_appeared` and
+rerun with `--fresh` to rebuild that plan. Exit `3` can
 also mean a **whole dataset is missing**: if the server answers HTTP 400 to one
 dataset's mapping, that dataset's files are recorded as junk with the server's
 reason, every other dataset is indexed, and `xerj-done` carries
