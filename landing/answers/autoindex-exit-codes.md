@@ -12,7 +12,7 @@ source: "content/answers/autoindex-exit-codes.md"
 
 **Key number:** The decision gate that produces exit 4 defaults to 10 minutes of estimated work (`DEFAULT_MAX_MINUTES`). (as of 2026-10-19; source: [engine/crates/xerj-autoindex/src/gate.rs](https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/gate.rs))
 
-**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success. With `stale-resume-plan`, `ok=false` means new files were not indexed. Rebuild with `--fresh` to include them. `xerj autoindex` exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed. Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.
+**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success. With `stale-resume-plan`, `ok=false` means new files were not indexed.
 
 ## Agent prompt
 
@@ -61,6 +61,10 @@ Note: Read the journal when the process is gone and you have no terminal line.
 ```sh
 xerj autoindex status --url http://127.0.0.1:9200 --state-dir ./state
 ```
+
+Rebuild with `--fresh` to include new files after `stale-resume-plan`. Exit 0 means the run completed; exit 3 means it completed with a reported limitation or junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed.
+
+Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.
 
 ## The codes, as the binary states them
 

@@ -71,7 +71,11 @@ faq:
     a: "Do not blindly retry 0 or 3. Exit 3 with stale-resume-plan requires a --fresh rebuild to include the new files. Re-run with `--approve` on 4. Fix the command line on 2. Investigate the endpoint and the journal on 1, because a blind retry repeats the same refusal. The one exit 1 to rerun unchanged is `reason=server-backpressure`, once the node accepts writes again: it resumes with the operations that remain."
 ---
 
-**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success. With `stale-resume-plan`, `ok=false` means new files were not indexed. Rebuild with `--fresh` to include them. `xerj autoindex` exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed. Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.
+**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success. With `stale-resume-plan`, `ok=false` means new files were not indexed.
+
+Rebuild with `--fresh` to include new files after `stale-resume-plan`. Exit 0 means the run completed; exit 3 means it completed with a reported limitation or junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed.
+
+Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.
 
 ## The codes, as the binary states them
 

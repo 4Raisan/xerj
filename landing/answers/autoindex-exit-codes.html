@@ -238,7 +238,7 @@
     <p>Exit 3 means the run finished with an outcome to inspect. Completed-with-junk is success; stale-resume-plan carries ok=false because new files were not indexed and needs a --fresh rebuild. Exit 0 is completion or cancellation, 4 needs approval, 2 is usage, and 1 is a real failure. Read the terminal reason and refusal counts before reporting coverage.</p>
     <p class="key-fact"><strong>Key number:</strong> The decision gate that produces exit 4 defaults to 10 minutes of estimated work (<code class="inline">DEFAULT_MAX_MINUTES</code>). <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/gate.rs">engine/crates/xerj-autoindex/src/gate.rs</a>)</span></p>
   </div>
-  <p><strong>TL;DR</strong> — Read the terminal reason as well as the exit code. Exit 3 with <code class="inline">completed-with-junk</code> is success. With <code class="inline">stale-resume-plan</code>, <code class="inline">ok=false</code> means new files were not indexed. Rebuild with <code class="inline">--fresh</code> to include them. <code class="inline">xerj autoindex</code> exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded <code class="inline">--max-minutes</code> and nothing was indexed. Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.</p>
+  <p><strong>TL;DR</strong> — Read the terminal reason as well as the exit code. Exit 3 with <code class="inline">completed-with-junk</code> is success. With <code class="inline">stale-resume-plan</code>, <code class="inline">ok=false</code> means new files were not indexed.</p>
   <div class="prompt-card">
     <span class="prompt-label">PASTE THIS TO YOUR AI AGENT — IT DOES THE REST</span>
     <code>Read https://xerj.org/llms.txt, then inspect the terminal reason as well as the exit code. Exit 3 with stale-resume-plan has ok=false and needs --fresh; completed-with-junk requires reading the refusal list. Answer exit 4 with --approve, correct usage on 2, and investigate the error on 1.</code>
@@ -274,6 +274,8 @@
     <button type="button" class="prompt-copy" data-copy="xerj autoindex status --url http://127.0.0.1:9200 --state-dir ./state">COPY COMMAND</button>
     <span class="hero-proof">Read the journal when the process is gone and you have no terminal line.</span>
   </div>
+  <p>Rebuild with <code class="inline">--fresh</code> to include new files after <code class="inline">stale-resume-plan</code>. Exit 0 means the run completed; exit 3 means it completed with a reported limitation or junk. Exit 4 means the estimate exceeded <code class="inline">--max-minutes</code> and nothing was indexed.</p>
+  <p>Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.</p>
   <h2>The codes, as the binary states them</h2>
   <p>The table summarizes <code class="inline">xerj autoindex --help</code>; the terminal reason distinguishes partial outcomes. Run that command yourself before you write a branch on any of these numbers.</p>
   <table>
