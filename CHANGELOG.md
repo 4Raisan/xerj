@@ -35,6 +35,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Boolean text queries with one `must` match now keep `filter` and `must_not`
+  clauses non-scoring before a flush and on mixed memory/segment indices.
+  Their retained hits use the same BM25 scores as the bare match (#2403).
+
+- Reindex preflights every source alias member before creating or writing the
+  destination. Aliases cannot hide a source/destination overlap; a missing
+  source, invalid query or source flush failure leaves destination data intact.
+  An alias with `is_write_index: false` refuses writes even with one member.
+
+- TS/JS factory constants exported by a separate local export clause or
+  default identifier now get definition records at their declaration lines
+  (refs #2579). Inline `export const` stays supported; private constants,
+  function-local bindings, type-only exports and remote re-exports stay out.
+  Existing unchanged files need re-extraction to gain these definitions.
+
 - Corpus cloning validates existing checkouts and serializes writers (#2453).
   New checkouts are staged before publication. Ambiguous existing directories
   are preserved for recovery rather than deleted or reset automatically.
@@ -277,6 +292,12 @@ continues in #2427 and #1122, which stay open.
   `queries` as shorthand for `{"query": <string>}` (#2497). A string item
   used to fail alone with "arguments must be a JSON object", so an agent
   that sent `["a", "b"]` lost a call; the advertised schema now allows it.
+- `_reindex` follows aliases on both sides: a source alias is searched across
+  every backing index and each member's alias filter is applied, and a
+  destination alias writes to its single write index (an ambiguous alias is
+  refused with `illegal_argument_exception`). Previously only the first
+  backing index was read or written and filters were ignored, so the call
+  reported success over the wrong data.
 
 - `xerj corpus add` accepts a local Windows path such as
   `F:\Projects\Foo` (#2472). The repo name was the text after the last `/`,
