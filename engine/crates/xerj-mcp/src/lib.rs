@@ -2637,6 +2637,9 @@ fn build_search_with_mapping(
         body.entry("_source".to_string()).or_insert_with(|| {
             json!([
                 "ax_path",
+                // Every name of a deduplicated file, so the hit cites the
+                // live one rather than a backup copy (#2402).
+                "ax_paths",
                 "ax_file",
                 "ax_locator",
                 "path",
