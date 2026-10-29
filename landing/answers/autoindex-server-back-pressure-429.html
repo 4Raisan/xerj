@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Why does xerj autoindex say the server pushed back (429)?</title>
-<meta name="description" content="When the node answers a bulk, or items inside one, with HTTP 429 (its memory circuit breaker), xerj autoindex re-sends the rejected items, waits out the moment, and reports bulk_retries on the terminal line. Only 600 s of re-sends that never clear is fatal.">
+<title>xerj autoindex 429 (server pushed back): the run retries</title>
+<meta name="description" content="A 429 means the node shed load for a moment. xerj autoindex re-sends only the rejected items and carries on. It exits 1 only after 600 s that never clear.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/autoindex-server-back-pressure-429">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Why does xerj autoindex say the server pushed back (429)?">
-<meta property="og:description" content="When the node answers a bulk, or items inside one, with HTTP 429 (its memory circuit breaker), xerj autoindex re-sends the rejected items, waits out the moment, and reports bulk_retries on the terminal line. Only 600 s of re-sends that never clear is fatal.">
+<meta property="og:title" content="xerj autoindex 429 (server pushed back): the run retries">
+<meta property="og:description" content="A 429 means the node shed load for a moment. xerj autoindex re-sends only the rejected items and carries on. It exits 1 only after 600 s that never clear.">
 <meta property="og:url" content="https://xerj.org/answers/autoindex-server-back-pressure-429">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Why does xerj autoindex say the server pushed back (429)?">
-<meta name="twitter:description" content="When the node answers a bulk, or items inside one, with HTTP 429 (its memory circuit breaker), xerj autoindex re-sends the rejected items, waits out the moment, and reports bulk_retries on the terminal line. Only 600 s of re-sends that never clear is fatal.">
+<meta name="twitter:title" content="xerj autoindex 429 (server pushed back): the run retries">
+<meta name="twitter:description" content="A 429 means the node shed load for a moment. xerj autoindex re-sends only the rejected items and carries on. It exits 1 only after 600 s that never clear.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Why does xerj autoindex say the server pushed back (429)?",
-  "description": "When the node answers a bulk, or items inside one, with HTTP 429 (its memory circuit breaker), xerj autoindex re-sends the rejected items, waits out the moment, and reports bulk_retries on the terminal line. Only 600 s of re-sends that never clear is fatal.",
+  "headline": "xerj autoindex 429 (server pushed back): the run retries",
+  "description": "A 429 means the node shed load for a moment. xerj autoindex re-sends only the rejected items and carries on. It exits 1 only after 600 s that never clear.",
   "url": "https://xerj.org/answers/autoindex-server-back-pressure-429",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-09-18",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -232,9 +232,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>THE SERVER PUSHED BACK WITH HTTP 429. DID XERJ AUTOINDEX LOSE THE RUN?</div>
   <div class="kicker"><span>ANSWERS · OPERATIONS: EXIT CODES</span></div>
   <h1>The server pushed back with HTTP 429. Did xerj autoindex lose the run?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-09-18 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-09-18 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>Why did xerj autoindex say the server pushed back with HTTP 429? The node shed load for a moment through its memory circuit breaker. autoindex lowers bulk concurrency, re-sends only the rejected items, and reports bulk_retries on the terminal line. It exits 1 only after 600 seconds of re-sends the node never accepts, and the same command resumes.</p>
     <p class="key-fact"><strong>Key number:</strong> One bulk request carries at most 10,000 actions (<code class="inline">BULK_MAX_ACTIONS</code>), a fifth of the engine's default limit. <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/esclient.rs">engine/crates/xerj-autoindex/src/esclient.rs</a>)</span></p>
   </div>

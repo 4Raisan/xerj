@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Improve a basic FAISS RAG pipeline</title>
-<meta name="description" content="Move the chunk store into one XERJ index and fuse BM25 with kNN. Two request shapes that a FAISS user reaches for first both return HTTP 400.">
+<title>Improve a basic FAISS RAG pipeline with hybrid search</title>
+<meta name="description" content="Move the FAISS chunk store into one XERJ index and fuse BM25 with vectors in a hybrid query. Two request shapes FAISS users try first return HTTP 400.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/improve-basic-faiss-rag-pipeline">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Improve a basic FAISS RAG pipeline">
-<meta property="og:description" content="Move the chunk store into one XERJ index and fuse BM25 with kNN. Two request shapes that a FAISS user reaches for first both return HTTP 400.">
+<meta property="og:title" content="Improve a basic FAISS RAG pipeline with hybrid search">
+<meta property="og:description" content="Move the FAISS chunk store into one XERJ index and fuse BM25 with vectors in a hybrid query. Two request shapes FAISS users try first return HTTP 400.">
 <meta property="og:url" content="https://xerj.org/answers/improve-basic-faiss-rag-pipeline">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Improve a basic FAISS RAG pipeline">
-<meta name="twitter:description" content="Move the chunk store into one XERJ index and fuse BM25 with kNN. Two request shapes that a FAISS user reaches for first both return HTTP 400.">
+<meta name="twitter:title" content="Improve a basic FAISS RAG pipeline with hybrid search">
+<meta name="twitter:description" content="Move the FAISS chunk store into one XERJ index and fuse BM25 with vectors in a hybrid query. Two request shapes FAISS users try first return HTTP 400.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Improve a basic FAISS RAG pipeline",
-  "description": "Move the chunk store into one XERJ index and fuse BM25 with kNN. Two request shapes that a FAISS user reaches for first both return HTTP 400.",
+  "headline": "Improve a basic FAISS RAG pipeline with hybrid search",
+  "description": "Move the FAISS chunk store into one XERJ index and fuse BM25 with vectors in a hybrid query. Two request shapes FAISS users try first return HTTP 400.",
   "url": "https://xerj.org/answers/improve-basic-faiss-rag-pipeline",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -224,9 +224,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>HOW DO I IMPROVE A BASIC FAISS RAG PIPELINE?</div>
   <div class="kicker"><span>ANSWERS · RAG: TROUBLESHOOTING</span></div>
   <h1>How do I improve a basic FAISS RAG pipeline?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>How can I improve a basic FAISS RAG pipeline? Load the chunk store into one XERJ index with a semantic_text field and retrieve with the hybrid clause, which fuses BM25 and kNN, instead of vectors alone. Our 20-chunk migration indexed cleanly, and the two request shapes FAISS users write first both returned HTTP 400.</p>
     <p class="key-fact"><strong>Key number:</strong> With the neural embedder, hybrid RRF beat vectors alone on BEIR SciFact: nDCG@10 0.6993 against 0.6764. <span class="mute">(as of 2026-09-18 · source: <a href="https://github.com/xerj-org/xerj/blob/main/benchmarks/beir-hybrid/results/scifact.txt">benchmarks/beir-hybrid/results/scifact.txt</a>)</span></p>
   </div>
@@ -320,8 +320,8 @@
     <li><a href="/answers/reciprocal-rank-fusion-when-to-use">What is Reciprocal Rank Fusion?</a></li>
     <li><a href="/answers/vector-database-vs-full-text-search">What's the actual difference between a vector database and full-text search when I have a folder?</a></li>
     <li><a href="/answers/how-xerj-combines-search">How does XERJ combine BM25 and kNN?</a> <span class="mute">· same intent: retrieval research and eval</span></li>
+    <li><a href="/answers/hybrid-search-quality-measured-ndcg">How much better is hybrid search than BM25? Measured nDCG numbers</a> <span class="mute">· same intent: retrieval research and eval</span></li>
     <li><a href="/answers/rerank-search-results-calibrated-judge">How do I rerank search results with a relevance judge?</a> <span class="mute">· same intent: retrieval research and eval</span></li>
-    <li><a href="/answers/classify-text-from-labelled-history-without-llm">Can I route tickets or filter spam from labelled history, without an LLM call?</a> <span class="mute">· same intent: retrieval research and eval</span></li>
   </ul>
 </main>
 <nav class="docs-nav" aria-label="Article sections">

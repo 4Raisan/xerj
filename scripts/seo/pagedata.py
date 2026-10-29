@@ -81,8 +81,8 @@ PAGES: dict[str, dict[str, str]] = {
         # 4.6, 1 click). Every clause is on the page body: autoindex of a
         # folder, keyword/semantic/vector/hybrid search, the /_memory store,
         # "No SDK, no signup" in the lead.
-        title="XERJ for AI agents: one local binary for search and memory",
-        description="A new way for AI to search for data: one local binary that indexes any folder, searches by keyword or meaning and keeps agent memory. No signup, no SDK.",
+        title="XERJ for AI agents: search any folder, keep agent memory",
+        description="XERJ is the search engine for AI agents: a local binary that indexes any folder, searches by keyword or meaning and keeps agent memory. No signup, no SDK.",
     ),
     "playground.html": dict(
         label="Playground", kind="software",
@@ -99,8 +99,8 @@ PAGES: dict[str, dict[str, str]] = {
     ),
     "benchmarks/elasticsearch.html": dict(
         label="ES scorecard", kind="software",
-        title="XERJ vs Elasticsearch — reproducible benchmarks",
-        description="XERJ v1.0.0-rc.6 against Elasticsearch 8.13.4 across 88 measured cells — 55 win, 26 tie, 4 lose, 3 n/a — plus the four commands that reproduce every one.",
+        title="XERJ vs Elasticsearch benchmarks: 88 cells, reproducible",
+        description="XERJ v1.0.0-rc.6 against Elasticsearch 8.13.4 in 88 measured cells: 55 win, 26 tie, 4 lose, 3 n/a. Four commands reproduce every one of them.",
     ),
     # ── blog ────────────────────────────────────────────────────────────────
     # Every post's og_image is its cover from the field-log series
@@ -164,9 +164,9 @@ PAGES: dict[str, dict[str, str]] = {
     # as rc.79 + rc.80 + v1.1.0 and measured as one suite; the post says so.
     "blog/the-rc80-gates.html": dict(
         label="The rc.80 gates", kind="article",
-        title="The rc.80 gates: three passed outright, three failed, one split",
-        description="Ten features, eight measured gates: /_ask macro-F1 0.9975, xerj_map 20/30 to 0/30, calibration ECE 0.0088 pass; the judge, the flywheel and the decide head fail their bars, numbers published.",
-        published="2026-09-30", updated="2026-09-30",
+        title="The rc.80 gates: three passed, three failed, one split",
+        description="Eight measured gates for rc.80. /_ask macro-F1 0.9975, xerj_map 20/30 to 0/30 and ECE 0.0088 pass. The judge, flywheel and decide head fail, numbers shown.",
+        published="2026-09-30", updated="2026-10-28",
         og_image="og/blog-the-rc80-gates.png",
         og_image_alt="Cover: “The rc.80 gates” in display type beside the post’s square-matrix art, labelled with its figures. The art: ten gates built from squares in two rows: three yellow with check marks, three ink with crosses, one half yellow and three faint",
     ),
@@ -177,11 +177,11 @@ PAGES: dict[str, dict[str, str]] = {
     # registry itself on the corpus-hub branch (4 manifests + 1 recipe).
     "blog/the-corpus-hub.html": dict(
         label="The Corpus Hub", kind="article",
-        title="The Corpus Hub: pinned, licenced, signed, contributed by PR",
-        description="A public registry of corpora for AI agents: reference code pinned to SHAs, record packs ed25519-signed, every source licence-reviewed by a human. The measured use case (2.7× fewer output tokens), the tie we published anyway, and how to contribute yours by PR.",
+        title="XERJ Corpus Hub: signed, pinned corpora for AI agents",
+        description="The XERJ Corpus Hub is a public registry of corpora for AI agents: sources pinned to commit SHAs, licences human-reviewed, record packs ed25519-signed.",
         published="2026-10-01",
         # 2026-10-20: one in-body link to asking a pinned repo without cloning.
-        updated="2026-10-20",
+        updated="2026-10-28",
         og_image="og/blog-the-corpus-hub.png",
         og_image_alt="Cover: “The Corpus Hub” in display type beside the post’s square-matrix art, labelled with its figures. The art: a 10 by 10 wall of square-matrix pack tiles in shades of ink, the first four solid yellow and the fifth framed",
     ),
@@ -255,9 +255,9 @@ PAGES: dict[str, dict[str, str]] = {
     ),
     "blog/corpus-hub-v2.html": dict(
         label="Corpus Hub v2", kind="article",
-        title="Corpus Hub v2: ask a question, get the one pack that answers",
-        description="Hub v2 routes a plain question to one signed corpus, pulls only that pack (lz4: 4.4 MB) and answers locally: 1.7 to 2.3 s cold, under 60 ms warm.",
-        published="2026-10-19", updated="2026-10-20",
+        title="XERJ Corpus Hub v2: ask a question, get a local answer",
+        description="Corpus Hub v2 routes a plain question to one signed corpus, pulls only that pack (lz4: 4.4 MB) and answers locally: 1.7 to 2.3 s cold, under 60 ms warm.",
+        published="2026-10-19", updated="2026-10-28",
         og_image="og/blog-corpus-hub-v2.png",
         og_image_alt="Cover: “Corpus Hub v2” in display type beside the post’s square-matrix art, labelled with its figures. The art: a faint wall of 251 small tiles above 14 larger square-matrix tiles; a yellow route runs from the top into one yellow tile and down to a framed node",
     ),
@@ -316,7 +316,8 @@ PAGES: dict[str, dict[str, str]] = {
     # All six shared one title and one description before this pass.
     "use-cases.html": dict(
         label="Use cases", kind="collection",
-        description="Seven enterprise retrieval workloads on one binary — no Logstash, no Beats, no separate vector database — each with a reproducible ES 8.13 benchmark.",
+        title="XERJ use cases: AI security audits and search, measured",
+        description="What teams run on one XERJ binary: AI security audits of WordPress and of XERJ, plus security, log and AI search measured against Elasticsearch 8.13.",
     ),
     "use-cases/ai-search-retrieval.html": dict(
         label="AI search & retrieval", kind="webpage", updated="2026-10-24",
@@ -385,7 +386,8 @@ PAGES: dict[str, dict[str, str]] = {
     ),
     "case-studies/wordpress-security-audit.html": dict(
         label="WordPress security audit", kind="article",
-        description="An AI agent audited WordPress core — 1,492 files, roughly 619k lines — for about 26,000 tokens instead of 5,200,000, with per-phase costs measured.",
+        title="AI WordPress security audit: 26K tokens, not 5.2M",
+        description="An AI agent audited WordPress core, 1,492 files and about 619k lines, for about 26,000 tokens instead of 5,200,000, with the cost of each phase measured.",
     ),
     "case-studies/xerj-self-audit.html": dict(
         label="XERJ audits its own Rust", kind="article",
@@ -594,8 +596,8 @@ PAGES: dict[str, dict[str, str]] = {
     # ── generated article hubs ─────────────────────────────────────────────
     "answers/index.html": dict(
         label="Answers", kind="collection",
-        title="XERJ answers — direct technical guidance",
-        description="Direct answers about XERJ search, indexing and agent workflows, with evidence links and practical guidance for AI builders.",
+        title="XERJ answers: how AI agents search files, code and logs",
+        description="Short, direct answers on how AI agents search local files, code, logs and PDFs with XERJ. Each one has the commands to run and links to its evidence.",
     ),
     "compare/index.html": dict(
         label="Comparisons", kind="collection",

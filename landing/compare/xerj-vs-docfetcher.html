@@ -79,7 +79,7 @@
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-22",
-  "dateModified": "2026-10-23",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -216,9 +216,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/compare/">COMPARISONS</a><span class="sep">·</span>WHAT'S A FREE DOCFETCHER ALTERNATIVE THAT AN AGENT CAN CALL?</div>
   <div class="kicker"><span>COMPARE · COMPARISON: DESKTOP SEARCH</span></div>
   <h1>What's a free DocFetcher alternative that an agent can call?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-23</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-23</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>What is a free DocFetcher alternative that an agent can call? XERJ: a search engine a program calls over HTTP or MCP. DocFetcher stays the better desktop GUI: it reads Outlook PST files and nested archives, and its portable version carries the index on a USB drive. This is a capability comparison; no benchmark was run.</p>
     <p class="key-fact"><strong>Key number:</strong> DocFetcher's download page lists version 1.1.27 under the Eclipse Public License. <span class="mute">(as of 2026-10-19 · source: <a href="https://docfetcher.sourceforge.io/download/">docfetcher.sourceforge.io/download</a>)</span></p>
   </div>
@@ -266,7 +266,7 @@
   <p>XERJ is a single Rust binary that runs one search node. <code class="inline">xerj autoindex &lt;folder&gt;</code> reads the folder and detects each file family by content. It infers a dataset per file shape and writes the documents.</p>
   <p>The command takes no configuration file and no mapping.</p>
   <p>The node answers the Elasticsearch REST API. <code class="inline">xerj autoindex map</code> prints a data map of what the folder became. An agent reads that map, then names a real index and a real field.</p>
-  <p><code class="inline">xerj mcp</code> is a stdio MCP server in the same binary. It serves 22 tools against a node you already started. Agent memory lives in the engine under <code class="inline">/_memory/{namespace}</code>.</p>
+  <p><code class="inline">xerj mcp</code> is a stdio MCP server in the same binary. It serves 23 tools against a node you already started. Agent memory lives in the engine under <code class="inline">/_memory/{namespace}</code>.</p>
   <p>XERJ is single-node. There is no replication and no failover. The default embedder is lexical feature hashing, not a neural model, and neural retrieval is opt-in through <code class="inline">--embed-mode neural</code>.</p>
   <h2>Capabilities, side by side</h2>
   <p>Every row is a documented capability of each tool. No row is a measured result.</p>
@@ -283,7 +283,7 @@
       <tr><td>automatic index updates</td><td>yes, while the application runs</td><td>rerun <code class="inline">xerj autoindex</code></td></tr>
       <tr><td>format detection</td><td>file extension, with a regex option</td><td>content sniffing per family</td></tr>
       <tr><td>HTTP query API</td><td>not in the free application</td><td>yes, Elasticsearch REST API</td></tr>
-      <tr><td>MCP server for an agent</td><td>none</td><td>yes, <code class="inline">xerj mcp</code>, 22 tools</td></tr>
+      <tr><td>MCP server for an agent</td><td>none</td><td>yes, <code class="inline">xerj mcp</code>, 23 tools</td></tr>
       <tr><td>catalog of refused files</td><td>index report in the GUI</td><td><code class="inline">autoindex-catalog</code>, one reason per file</td></tr>
       <tr><td>agent memory in the engine</td><td>none</td><td>yes, <code class="inline">/_memory/{namespace}</code></td></tr>
       <tr><td>license</td><td>Eclipse Public License</td><td>Apache-2.0</td></tr>

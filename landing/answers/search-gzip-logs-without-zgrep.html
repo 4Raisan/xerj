@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Search gzipped logs without decompressing them</title>
-<meta name="description" content="XERJ autoindex decompresses a .gz log once at index time. In our capture the plain and gzip copies returned identical counts, identical hits and one date field.">
+<title>Search .gz logs without zgrep: decompress once, query often</title>
+<meta name="description" content="XERJ decompresses a .gz log once at index time, so queries never read the archive again. The plain and gzip copies of one log returned the same counts.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/search-gzip-logs-without-zgrep">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Search gzipped logs without decompressing them">
-<meta property="og:description" content="XERJ autoindex decompresses a .gz log once at index time. In our capture the plain and gzip copies returned identical counts, identical hits and one date field.">
+<meta property="og:title" content="Search .gz logs without zgrep: decompress once, query often">
+<meta property="og:description" content="XERJ decompresses a .gz log once at index time, so queries never read the archive again. The plain and gzip copies of one log returned the same counts.">
 <meta property="og:url" content="https://xerj.org/answers/search-gzip-logs-without-zgrep">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Search gzipped logs without decompressing them">
-<meta name="twitter:description" content="XERJ autoindex decompresses a .gz log once at index time. In our capture the plain and gzip copies returned identical counts, identical hits and one date field.">
+<meta name="twitter:title" content="Search .gz logs without zgrep: decompress once, query often">
+<meta name="twitter:description" content="XERJ decompresses a .gz log once at index time, so queries never read the archive again. The plain and gzip copies of one log returned the same counts.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Search gzipped logs without decompressing them",
-  "description": "XERJ autoindex decompresses a .gz log once at index time. In our capture the plain and gzip copies returned identical counts, identical hits and one date field.",
+  "headline": "Search .gz logs without zgrep: decompress once, query often",
+  "description": "XERJ decompresses a .gz log once at index time, so queries never read the archive again. The plain and gzip copies of one log returned the same counts.",
   "url": "https://xerj.org/answers/search-gzip-logs-without-zgrep",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -224,9 +224,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>HOW DO I SEARCH GZIPPED LOGS WITHOUT DECOMPRESSING THE WHOLE FILE — INCLUDING WHEN JSONL SITS NEXT TO THEM?</div>
   <div class="kicker"><span>ANSWERS · FILES AND FORMATS</span></div>
   <h1 class="h1-long">How do I search gzipped logs without decompressing the whole file — including when JSONL sits next to them?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>How do I search gzipped logs without decompressing the whole file? Let XERJ decompress each .gz log once at index time, so no query reads the compressed file again. In our capture the plain copy and the gzip copy of one log both returned 5001 from _count, and both returned 1250 hits for level=ERROR.</p>
     <p class="key-fact"><strong>Key number:</strong> The plain and gzip copies of one log both returned a <code class="inline">_count</code> of 5001 and 1250 <code class="inline">level=ERROR</code> hits. <span class="mute">(as of 2026-08-21 · source: the captured run documented on this page)</span></p>
   </div>
@@ -308,8 +308,8 @@
     <li><a href="/answers/cheap-low-volume-log-search">What can I use for low-volume log search?</a></li>
     <li><a href="/answers/search-file-contents-in-a-folder">I have a folder of PDFs, Word docs, and markdown. How do I search all of them at once?</a></li>
     <li><a href="/answers/search-kubernetes-pod-logs-on-disk">How do I search Kubernetes pod logs?</a> <span class="mute">· same intent: logs and docs</span></li>
-    <li><a href="/answers/search-all-pdfs-in-a-folder">I downloaded a bunch of papers as PDFs. How do I search across them?</a> <span class="mute">· same intent: logs and docs</span></li>
     <li><a href="/answers/search-gmail-takeout-mbox-locally">I exported my Gmail with Google Takeout. How do I search that mbox file locally?</a> <span class="mute">· same intent: logs and docs</span></li>
+    <li><a href="/answers/search-all-pdfs-in-a-folder">I downloaded a bunch of papers as PDFs. How do I search across them?</a> <span class="mute">· same intent: logs and docs</span></li>
   </ul>
 </main>
 <nav class="docs-nav" aria-label="Article sections">
