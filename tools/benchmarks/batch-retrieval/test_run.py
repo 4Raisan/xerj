@@ -37,6 +37,7 @@ class ScoringTests(unittest.TestCase):
         cases = [{'kind': 'missing', 'input': {'key': 'same', 'identifier': 'no', 'field': 'id'},
                   'expected_ids': []}] * 2
         def call(args):
+            self.assertEqual(args["max_tokens"], 1_000_000)
             response = {'results': [{'position': i, 'key': 'same', 'status': 'abstain',
                                      'abstain': True, 'reason': 'no_hits'}
                                     for i in range(len(args['queries']))]}
@@ -53,6 +54,10 @@ class ScoringTests(unittest.TestCase):
             for receipt in result['calls']:
                 self.assertEqual(receipt['input_bpe_tokens'], receipt['request_bytes'])
                 self.assertEqual(receipt['output_bpe_tokens'], receipt['response_bytes'])
+
+    def test_budgeted_evidence_is_refused(self):
+        with self.assertRaisesRegex(ValueError, 'full evidence'):
+            eval.ordered_rows({'_token_budget': {}, 'results': []}, [])
 
     def test_wrong_id_is_not_correct(self):
         case = {'input': {'key': 'q'}, 'kind': 'canonical', 'expected_ids': ['known']}

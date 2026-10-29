@@ -491,11 +491,11 @@ the other direction: it hosts an MCP endpoint other agents connect to, and its s
 their servers from the harness underneath. Grok Bot has no documented local stdio registration; the
 Grok CLI does, which is the `grok` row above.
 
-Twenty-one tools are exposed. Eleven are thin proxies over an endpoint XERJ already serves:
+Twenty-three tools are exposed when Hub tools are enabled. Eleven are thin proxies over an endpoint XERJ already serves:
 
 | Tool | What it does |
 |---|---|
-| `xerj_search` | ES query-DSL search over an index |
+| `xerj_search` | keyword search over an index, from plain words (`query`) or an ES query-DSL clause (`query_dsl`) |
 | `xerj_semantic_search` | recall by meaning over a `semantic_text` field, the query embedded server-side (default embedder is lexical feature-hashing, not neural, unless the node runs `--embed-mode neural`) |
 | `xerj_vector_search` | kNN over a `dense_vector` field |
 | `xerj_hybrid_search` | RRF or linear fusion of sub-queries |
@@ -510,6 +510,19 @@ the same function as the CLI: the prefix `xerj autoindex --prefix` stores, so
 pattern instead; non-empty `index` and `prefix` cannot be combined. An empty
 prefix, a prefix with no `[a-z0-9]` character, or a prefix that cannot name an
 index is an error. With neither argument, the tool searches `ax-*`.
+
+For new callers, `query` is a plain string and structured ES query-DSL goes in
+`query_dsl` — `{"index":"docs","query_dsl":{"match_all":{}}}`. Do not combine
+both fields. The published schema separates the types to simplify tool calls
+(#2549); it cannot guarantee a model emits valid JSON. Existing callers may
+still pass an object in `query`, and omitting both fields retains `match_all`
+browsing. Prefer an explicit `query_dsl` clause when browsing is intended.
+
+Search tools and `xerj batch-search` default to an 8,000 UAX #29 word budget
+when `max_tokens` is omitted or null. A larger integer requests more evidence;
+accounting explains any trimming. This is not a byte cap or a model/BPE token
+limit. Errors and mandatory `xerj_search` staleness hints are outside this
+budget and remain visible.
 
 `xerj_def` finds local definitions with the same query, ranking and location deduplication
 as `xerj def --json`. For example, `{"symbol":"Cache","prefix":"project","kind":"struct","lang":"rust","k":5}`
@@ -528,6 +541,10 @@ reference-coding pipeline ([`tools/xerj-code/`](tools/xerj-code/)) and returns i
 `xerj_index_budget` counts a folder and estimates its index against the node's disk budget
 before `xerj autoindex` hashes anything (it does not index). `xerj_autoindex_remove` drops
 one autoindexed folder after listing it, and deletes nothing unless `confirm` is true.
+`xerj_status` probes the node banner, cluster health and visible indices with
+up to three bounded reads. A missing autoindex catalog does not mean the node
+has no data; refused or malformed probes remain errors or unknown status.
+`xerj_batch_search` retrieves ordered batches with per-item outcomes and citations.
 `xerj_corpus_feedback` rates a hub corpus.
 `xerj_field_report` files a field report, and `xerj_hub_find`, `xerj_hub_def` and `xerj_hub_ask`
 answer from Corpus Hub packs already on the machine (the `xerj ask` flow).

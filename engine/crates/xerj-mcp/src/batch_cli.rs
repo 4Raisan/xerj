@@ -22,7 +22,8 @@ Output is one JSON object with ordered results; position is zero-based and
 authoritative even for duplicate keys. status is hits, abstain (complete empty
 search only), or error. Hits contain citations and raw evidence, not generated
 answers or calibrated confidence. A miss does not discard its siblings.
-max_tokens counts the entire JSON as UAX #29 words, not model/BPE tokens.
+max_tokens defaults to 8000 when omitted or null; pass a larger integer for more.
+It counts the entire JSON as UAX #29 words, not bytes or model/BPE tokens.
 It removes raw bodies and then extra hits, retaining every item outcome and
 one citation per matched item; an insufficient budget is an error, not truncation.
 
