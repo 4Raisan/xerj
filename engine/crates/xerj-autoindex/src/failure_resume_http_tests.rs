@@ -1659,7 +1659,9 @@ fn a_resume_whose_plan_predates_new_files_reports_a_stale_plan_not_junk() {
         .unwrap_or_else(|| panic!("no JSON done event:\n{stream}"));
     assert_eq!(done["exit"], 3, "{done}");
     assert_eq!(done["reason"], "stale-resume-plan", "{done}");
-    assert_eq!(done["ok"], true, "{done}");
+    // #2411: exit 3 is not an error, but `ok` is not "the run finished" — it is
+    // "the index covers this folder", and these files are not in it.
+    assert_eq!(done["ok"], false, "{done}");
     assert_eq!(done["skipped_appeared"], 2, "{done}");
     assert_eq!(
         done["skipped_appeared_files"],

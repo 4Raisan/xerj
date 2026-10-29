@@ -1502,7 +1502,7 @@ pub(crate) fn is_stale_resume_skip(junk: &JunkFile) -> bool {
 /// note still lists up to [`REFUSAL_LIST_CAP`].
 const STALE_RESUME_SUMMARY_CAP: usize = 5;
 
-/// Recovery sentence shared by the `ok:` headline, the path list, and the JSON field.
+/// Recovery sentence shared by the headline, the path list, and the JSON field.
 ///
 /// One sentence, so the summary that names the paths also says `--fresh`
 /// right there (#2372).
@@ -1527,7 +1527,7 @@ fn stale_resume_appeared_paths(junk: &[&JunkFile]) -> Vec<String> {
 
 /// Human lines for the stale-resume-plan summary.
 ///
-/// The `ok:` headline stays one line. These sit under it and name the files,
+/// The headline stays one line. These sit under it and name the files,
 /// because a count alone sent an agent back to `--help` to find out what was
 /// skipped (#2372). Empty when nothing appeared, so a clean run's summary is
 /// unchanged.
@@ -1775,7 +1775,10 @@ fn generated_exit_code(summary: &Value) -> i32 {
 /// mentioned the exit code at all. A finished run leads with one line that
 /// starts `ok:` and names the exit code in words; exit 3 also says what was
 /// recorded and where to look, so junk stays visible. A family-wide PDF
-/// worker startup failure (#2336) leads with `not ok:` and exit 1.
+/// worker startup failure (#2336) leads with `not ok:` and exit 1. So does an
+/// index that does not cover the folder because a stale resume plan skipped
+/// files (#2411): exit 3, `ok=false`, and the line says the skipped files are
+/// not searchable.
 pub(crate) fn outcome_headline(
     code: i32,
     junk_files: u64,
@@ -1797,9 +1800,14 @@ pub(crate) fn outcome_headline(
     }
     if stale_plan_files > 0 {
         let files = estimate::count_phrase(stale_plan_files, "file", "files");
+        // #2411: `not ok:`, not `ok:`. The run finished and exit 3 is not an
+        // error, but the index does not cover the folder, and the `ok:` prefix
+        // was read as "this folder is searchable" by a caller that then saw
+        // four of its five files missing from results.
         let mut line = format!(
-            "ok: indexed and searchable — exit 3 ({STALE_RESUME_PLAN_REASON}): {files} skipped \
-             because the resumed plan is stale and were not indexed. {STALE_RESUME_SUMMARY_ACTION}"
+            "not ok: the index does not cover this folder — exit 3 \
+             ({STALE_RESUME_PLAN_REASON}): {files} skipped because the resumed plan is stale and \
+             were not indexed, so they are not searchable. {STALE_RESUME_SUMMARY_ACTION}"
         );
         if junk_files > 0 || junk_records > 0 {
             let mut recorded = Vec::new();
@@ -12728,8 +12736,14 @@ fn run_index_report_inner(
     if !appeared_json.is_empty() {
         pr.set_done_json(appeared_json.clone());
     }
+    // #2411: `ok` means this run's index covers the folder, not merely that
+    // nothing crashed. A stale resume plan leaves files that are on disk out of
+    // the index, so the corpus is incomplete even though exit 3 is not an error
+    // — `ok=true` told a reader the folder was indexed when four of its five
+    // files were not.
+    let complete = pdf_worker_unavailable.is_none() && skipped_appeared == 0;
     pr.finish(
-        pdf_worker_unavailable.is_none(),
+        complete,
         code,
         // A worker that cannot start wins the `reason`: exit 3 would call a
         // missing PDF family success (#2336). A stale plan is next, because
@@ -15004,6 +15018,12 @@ mod generation_contract_identity_tests {
         );
 
         let stale = outcome_headline(3, 0, 0, false, 2, None, 0);
+        // #2411: the prefix is the contract. `ok:` says "this folder is
+        // searchable"; a stale plan leaves files on disk out of the index, so
+        // the line must not claim that.
+        assert!(stale.starts_with("not ok:"), "{stale}");
+        assert!(stale.contains("does not cover this folder"), "{stale}");
+        assert!(stale.contains("not searchable"), "{stale}");
         assert!(stale.contains("exit 3 (stale-resume-plan)"), "{stale}");
         assert!(
             stale.contains("2 files skipped because the resumed plan is stale"),
