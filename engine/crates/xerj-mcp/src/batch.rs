@@ -15,14 +15,14 @@ pub(crate) fn spec() -> Value {
             "type":"object", "additionalProperties":false,
             "properties":{
                 "queries":{"type":"array","minItems":1,"maxItems":50,
-                    "description":"Ordered queries. Duplicate keys are allowed; position is authoritative. Entire input is limited to 1 MiB.",
-                    "items":{"type":"object","additionalProperties":false,"properties":{
+                    "description":"Ordered queries. A plain string item is shorthand for {\"query\": <string>}. Duplicate keys are allowed; position is authoritative. Entire input is limited to 1 MiB.",
+                    "items":{"anyOf":[{"type":"string","minLength":1},{"type":"object","additionalProperties":false,"properties":{
                         "key":{"type":"string","description":"Optional correlation key, at most 256 UTF-8 bytes."},
                         "query":{"oneOf":[{"type":"string","minLength":1},{"type":"object"}],
                             "description":"Plain text or ES query clause. Cannot be combined with identifier/field."},
                         "identifier":{"type":"string","minLength":1,"description":"Exact value, used verbatim in a term query; requires field."},
                         "field":{"type":"string","minLength":1,"description":"Flat keyword field for identifier. Must be mapped as keyword wherever present; unreadable, absent or conflicting mappings fail this item."}
-                    }, "oneOf":[{"required":["query"]},{"required":["identifier","field"]}]}},
+                    }, "oneOf":[{"required":["query"]},{"required":["identifier","field"]}]}]}},
                 "index":{"type":"string","description":"Index or pattern; alternative to prefix. Defaults to ax-*."},
                 "prefix":{"type":"string","description":"Autoindex prefix, e.g. project searches project-*. Cannot combine with index."},
                 "size":{"type":"integer","minimum":1,"maximum":50,"default":3,"description":"Maximum hits per item."},
@@ -282,15 +282,19 @@ fn item_result(
 }
 
 async fn msearch(ctx: &Ctx, ndjson: String) -> Result<Vec<Value>, String> {
+    let url = format!("{}/_msearch", ctx.base_url);
     let mut req = ctx
         .client
-        .post(format!("{}/_msearch", ctx.base_url))
+        .post(&url)
         .header("Content-Type", "application/x-ndjson")
         .body(ndjson);
     if let Some(auth) = &ctx.auth {
         req = req.header("Authorization", auth);
     }
-    let mut resp = req.send().await.map_err(|e| crate::error_detail(&e))?;
+    let mut resp = req
+        .send()
+        .await
+        .map_err(|e| crate::transport_failure_text(&ctx.base_url, &url, &e))?;
     let status = resp.status();
     let mut bytes = Vec::new();
     while let Some(chunk) = resp.chunk().await.map_err(|e| crate::error_detail(&e))? {
@@ -300,10 +304,13 @@ async fn msearch(ctx: &Ctx, ndjson: String) -> Result<Vec<Value>, String> {
         bytes.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        return Err(format!(
-            "batch endpoint returned HTTP {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        ));
+        let body = String::from_utf8_lossy(&bytes);
+        if let Some(proxied) =
+            crate::proxy_status_failure(&ctx.base_url, &url, status.as_u16(), &body)
+        {
+            return Err(proxied);
+        }
+        return Err(format!("batch endpoint returned HTTP {status}: {body}"));
     }
     let response: Value =
         serde_json::from_slice(&bytes).map_err(|_| "batch endpoint returned invalid JSON")?;
@@ -386,6 +393,14 @@ pub(crate) async fn execute(ctx: &Ctx, args: &Value) -> Result<String, String> {
         limit,
         items,
     } = envelope(args)?;
+    // #2497: a bare string item is shorthand for {"query": <string>}.
+    let items: Vec<Value> = items
+        .iter()
+        .map(|item| match item {
+            Value::String(s) => json!({ "query": s }),
+            other => other.clone(),
+        })
+        .collect();
     // Validate locally before any I/O; invalid items do not sink siblings.
     let validation: Vec<_> = items.iter().map(validate_item).collect();
     let needs_mapping = items.iter().zip(&validation).any(|(item, valid)| {

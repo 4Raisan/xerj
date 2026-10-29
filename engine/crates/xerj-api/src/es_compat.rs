@@ -1512,12 +1512,22 @@ pub async fn create_index(
     // (#2281). A schema-only pass cannot: the stored mapping was the request
     // body, so a template `semantic_text` was rendered back as `object`, and
     // the template's settings were never copied.
-    let (mappings_val, merged_settings) = state.engine.merge_index_template(
+    let (mut mappings_val, merged_settings) = state.engine.merge_index_template(
         &index,
         body.get("mappings").cloned().unwrap_or(Value::Null),
         body.get("settings").cloned().unwrap_or(Value::Null),
     );
     let settings_ref = (!merged_settings.is_null()).then_some(&merged_settings);
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, schema build and the
+    // mapping's persistence all read this merged value.
+    if let Some(props) = mappings_val.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
+        }
+    }
 
     // Validate mapping field types before creating — ES returns
     // mapper_parsing_exception for unsupported types.
@@ -2605,8 +2615,10 @@ pub async fn delete_index(
         .map(|v| v == "true")
         .unwrap_or(true);
 
-    let all = state.engine.list_indices().await;
-    let mut all_names: Vec<String> = all.iter().map(|i| i.name.clone()).collect();
+    // Selector resolution needs names, not statistics. Waiting for every
+    // sibling's schema/memtable locks can stall an otherwise independent
+    // DELETE before it even reaches the requested index (#2405).
+    let mut all_names = state.engine.index_name_list();
     // A failed index is deletable. Its name has to take part in selector
     // resolution or a literal `DELETE /broken` 404s and a wildcard silently
     // skips it — which is exactly the stuck state issue #206 describes.
@@ -3128,7 +3140,7 @@ pub struct EsPutMappingBody {
 pub async fn put_mapping(
     State(state): State<AppState>,
     Path(index): Path<String>,
-    Json(body): Json<Value>,
+    Json(mut body): Json<Value>,
 ) -> impl IntoResponse {
     // Wildcard-expand index list.
     let targets = resolve_index_selector(&state, &index).await;
@@ -3179,6 +3191,16 @@ pub async fn put_mapping(
                 )
                     .into_response();
             }
+        }
+    }
+
+    // #2407: size a bare `semantic_text` at the width the server's embedding
+    // backend actually produces, before validation, the field parse and the
+    // merge into each target's stored mapping all read the request body.
+    if let Some(props) = body.get_mut("properties") {
+        if properties_have_bare_semantic_text(props) {
+            let dimensions = confirmed_semantic_dimensions(&state);
+            materialize_semantic_dimensions(props, dimensions);
         }
     }
 
@@ -3432,6 +3454,60 @@ fn embedder_warnings(state: &AppState, body: &Value) -> Vec<String> {
         proxy_endpoint: embedding.default_endpoint.clone(),
     };
     crate::embed_warning::semantic_embedder_warnings(body, &resolved)
+}
+
+/// True when `properties` (recursively) declares a `semantic_text` field
+/// without an explicit `dimensions`/`dims` — the shape #2407 is about.
+fn properties_have_bare_semantic_text(properties: &Value) -> bool {
+    let Some(obj) = properties.as_object() else {
+        return false;
+    };
+    obj.values().any(|spec| {
+        (spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none())
+            || spec
+                .get("properties")
+                .is_some_and(properties_have_bare_semantic_text)
+    })
+}
+
+/// Write `dimensions` into every bare `semantic_text` property, recursively.
+///
+/// #2407: a bare `semantic_text` was always sized at 384 (the built-in
+/// embedder's width) even when the server's own backend returns another
+/// width, so every document failed ingest with "embedding backend returned
+/// width N, mapping requires 384" and the just-created index sat green with
+/// 0 documents. Materializing the width into the mapping at creation time
+/// keeps the embedding contract explicit and immutable as designed, makes
+/// `GET _mapping` echo the real width, and leaves an explicit declaration
+/// untouched.
+fn materialize_semantic_dimensions(properties: &mut Value, dimensions: usize) {
+    let Some(obj) = properties.as_object_mut() else {
+        return;
+    };
+    for spec in obj.values_mut() {
+        if spec.get("type").and_then(Value::as_str) == Some("semantic_text")
+            && spec.get("dimensions").is_none()
+            && spec.get("dims").is_none()
+        {
+            if let Some(map) = spec.as_object_mut() {
+                map.insert("dimensions".into(), json!(dimensions));
+            }
+        }
+        if let Some(sub) = spec.get_mut("properties") {
+            materialize_semantic_dimensions(sub, dimensions);
+        }
+    }
+}
+
+/// The width this server's embedding backend actually produces: the confirmed
+/// identity width (for `proxy` this runs the #2306 probe, cached after the
+/// first confirmation), else 384 with a warning — the built-in default a bare
+/// mapping was always sized at. Resolved only when a mapping actually carries
+/// a bare `semantic_text`, so mappings without one never pay for a probe.
+fn confirmed_semantic_dimensions(state: &AppState) -> usize {
+    state.engine.confirmed_semantic_dimensions()
 }
 
 fn semantic_mapping_contract(
@@ -3973,12 +4049,32 @@ pub(crate) fn document_body(doc: &Value) -> bytes::Bytes {
 /// JSON extractor's extra validation pass and parse directly with simd_json /
 /// serde_json.  No schema validation is performed here; the engine layer handles
 /// all type coercion.  This shaves ~15–30 µs of extractor overhead per doc.
+/// Resolve an alias to the concrete index a document write must land in.
+/// A concrete name (or a name that will be auto-created) is returned
+/// unchanged; an ambiguous alias becomes ES's 400
+/// `illegal_argument_exception` instead of silently using the first backing
+/// index (`GET /{index}` does resolve aliases that way, but a write may not).
+fn write_target_or_refusal(
+    state: &AppState,
+    index: &str,
+) -> std::result::Result<String, axum::response::Response> {
+    match state.engine.write_target(index) {
+        Ok(Some(target)) => Ok(target),
+        Ok(None) => Ok(index.to_string()),
+        Err(reason) => Err(es_bad_request("illegal_argument_exception", &reason, None)),
+    }
+}
+
 pub async fn index_doc_auto(
     State(state): State<AppState>,
     Path(index): Path<String>,
     Query(params): Query<IndexDocAutoParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::new(e).into_response(),
@@ -4132,6 +4228,10 @@ pub async fn index_doc(
     Query(params): Query<IndexDocParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // Size check before the DOM exists. See [`parse_indexed_document_body`].
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
@@ -4343,6 +4443,10 @@ pub async fn create_doc(
     Query(params): Query<CreateDocParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let doc = match parse_indexed_document_body(&body) {
         Ok(v) => v,
         Err(e) => return ApiError::new(e).into_response(),
@@ -4643,6 +4747,10 @@ pub async fn get_doc(
     Path((index, id)): Path<(String, String)>,
     Query(params): Query<GetDocParams>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // A closed index rejects read/search ops with ES index_closed_exception.
     // Strict membership only — frozen/open indices are unaffected.
     if state.engine.closed_indices.contains_key(&index) {
@@ -4802,6 +4910,10 @@ pub async fn delete_doc(
     Path((index, id)): Path<(String, String)>,
     Query(params): Query<DeleteDocParams>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // Wire → internal seq translation, same convention as the index path.
     let if_seq_no_internal = params.if_seq_no.map(|s| s.saturating_add(1));
 
@@ -8640,6 +8752,12 @@ fn value_bearing_field_names(body: &EsSearchBody, fields: &[String]) -> Vec<Stri
         _ => names.extend(fields.iter().cloned()),
     }
     push_names(body.docvalue_fields.as_ref(), &mut names);
+    // `_passage` is computed by the engine into `hit.passage`, never read
+    // out of `_source`, so it cannot be dropped by a source filter. Counting
+    // it made every `fields: ["_passage"]` request with `_source` includes
+    // (the `xerj search` body) re-ask the engine for the whole document
+    // (#2422/#2423).
+    names.retain(|name| name != xerj_query::executor::PASSAGE_RESPONSE_FIELD);
     names
 }
 
@@ -10368,6 +10486,22 @@ fn referenced_or_recurse(v: &Value, out: &mut Vec<(String, String)>) {
 /// reasonable guess — and got a silent zero, because this corpus classifies
 /// Markdown as `txt-prose`/`txt-lines`. Discovering that cost the agent two
 /// round trips and a terms aggregation it had to think to write.
+/// Whether a response qualifies for the zero-hit `unknown_value` sample
+/// (#2451). Only a request that asked for hits (`size > 0`) and whose whole
+/// match set is empty: an empty page with a non-zero tracked total is a page
+/// past the end, not a wrong value, and a `size: 0` count/existence probe must
+/// stay as cheap as its own query — the sample is a 256-row full-source read.
+/// With `track_total_hits: false` the total is not authoritative, so the
+/// empty page (with `size > 0`) is the only signal, as before.
+fn zero_hit_value_sample_applies(
+    size: usize,
+    page_empty: bool,
+    total_count: u64,
+    track_total_disabled: bool,
+) -> bool {
+    size > 0 && page_empty && (track_total_disabled || total_count == 0)
+}
+
 fn unknown_value_hint(index: &str, field: &str, value: &str, present: &[String]) -> Value {
     json!({
         "hints": [{
@@ -11025,6 +11159,69 @@ mod search_response_hint_tests {
         let text = String::from_utf8(bytes.to_vec()).expect("utf8 response body");
         let json: Value = serde_json::from_str(&text).expect("valid JSON response body");
         (json, text)
+    }
+
+    fn has_unknown_value_hint(json: &Value) -> bool {
+        json["_xerj"]["hints"].as_array().is_some_and(|hints| {
+            hints
+                .iter()
+                .any(|h| h["code"].as_str() == Some("unknown_value"))
+        })
+    }
+
+    #[test]
+    fn zero_hit_value_sample_gates_on_the_match_set_not_the_page() {
+        // #2451: a `size: 0` probe never samples, hit or miss.
+        assert!(!super::zero_hit_value_sample_applies(0, true, 0, false));
+        assert!(!super::zero_hit_value_sample_applies(0, true, 7, false));
+        assert!(!super::zero_hit_value_sample_applies(0, true, 0, true));
+        // A page past the end of a non-empty match set is not a wrong value.
+        assert!(!super::zero_hit_value_sample_applies(10, true, 7, false));
+        // The case the hint exists for, tracked total or not.
+        assert!(super::zero_hit_value_sample_applies(10, true, 0, false));
+        assert!(super::zero_hit_value_sample_applies(10, true, 0, true));
+        assert!(!super::zero_hit_value_sample_applies(10, false, 3, false));
+    }
+
+    #[tokio::test]
+    async fn size_zero_term_probe_skips_the_unknown_value_sample() {
+        let state = test_state();
+        let mut schema = Schema::empty();
+        schema
+            .fields
+            .push(FieldConfig::new("kind", FieldType::Keyword));
+        state.engine.create_index("hint-probe", schema).unwrap();
+        let idx = state.engine.get_index("hint-probe").unwrap();
+        for (id, kind) in [("1", "alpha"), ("2", "beta")] {
+            idx.index_document(Some(id.into()), json!({ "kind": kind }))
+                .await
+                .unwrap();
+        }
+        idx.refresh().await.unwrap();
+        let router = crate::router::build_es_compat_router(state);
+
+        // A search that asked for hits and matched nothing keeps the hint.
+        let (json, _) = run_search(
+            &router,
+            "hint-probe",
+            json!({"size": 10, "query": {"term": {"kind": "gamma"}}}),
+        )
+        .await;
+        assert!(has_unknown_value_hint(&json), "hint expected: {json}");
+
+        // The autoindex existence-probe shape, miss and hit: an exact total,
+        // no sample (#2451).
+        for (value, total) in [("gamma", 0), ("alpha", 1)] {
+            let (json, _) = run_search(
+                &router,
+                "hint-probe",
+                json!({"size": 0, "track_total_hits": true,
+                       "query": {"term": {"kind": value}}}),
+            )
+            .await;
+            assert_eq!(json["hits"]["total"]["value"], total, "{json}");
+            assert!(!has_unknown_value_hint(&json), "no hint for size 0: {json}");
+        }
     }
 
     #[tokio::test]
@@ -13058,12 +13255,239 @@ async fn search_dispatch(
     principal: crate::auth::Principal,
     body: EsSearchJson,
 ) -> Response {
+    // #2400: `post_filter` narrows the hits, never the aggregations.
+    if let Some(split) = split_post_filter(&params, &body) {
+        return search_with_post_filter(state, index, params, principal, split).await;
+    }
+    search_routed(state, index, params, principal, body).await
+}
+
+/// One search through the cluster fan-out when it applies, else on this node.
+async fn search_routed(
+    state: AppState,
+    index: String,
+    params: EsSearchQueryParams,
+    principal: crate::auth::Principal,
+    body: EsSearchJson,
+) -> Response {
     if let Some(response) =
         crate::cluster_shard::fanout_search(&state, &index, &params, &principal, &body).await
     {
         return response;
     }
     search_impl(state, index, params, principal, body).await
+}
+
+/// The searches a request with `post_filter` becomes (#2400). Elasticsearch
+/// applies `post_filter` to the hits after the aggregations are computed, so
+/// a faceted UI can show a facet's other values while one is selected.
+///
+/// - `hits`: the query wrapped as `bool{must: [query], filter: [post_filter]}`,
+///   without aggregations. A filter clause does not score, so the hits, their
+///   scores and `hits.total` are what Elasticsearch returns.
+/// - `aggs`: when the request aggregates, the original request without
+///   `post_filter` and with `size: 0`, so the aggregations are exactly what
+///   they were before.
+struct PostFilterSplit {
+    hits: EsSearchBody,
+    aggs: Option<(EsSearchQueryParams, EsSearchBody)>,
+}
+
+/// `None` leaves the request as it is: no `post_filter`; a hybrid query, which
+/// `build_search_request` rejects beside `post_filter` (#943); or a `?q=`
+/// query, which replaces the body query this wraps.
+fn split_post_filter(params: &EsSearchQueryParams, body: &EsSearchJson) -> Option<PostFilterSplit> {
+    let original = body.0.as_ref()?;
+    let filter = original.post_filter.clone()?;
+    if params.q.is_some() {
+        return None;
+    }
+    let query = original
+        .query
+        .clone()
+        .unwrap_or_else(|| json!({ "match_all": {} }));
+    let hybrid = parse_request(&json!({ "query": query }))
+        .map(|req| req.query.contains_hybrid())
+        .unwrap_or(false);
+    if hybrid {
+        return None;
+    }
+
+    let mut hits = original.clone();
+    hits.post_filter = None;
+    hits.query = Some(json!({ "bool": { "must": [query], "filter": [filter] } }));
+    let had_aggs = hits.aggs.take().is_some();
+    let had_aggregations = hits.aggregations.take().is_some();
+
+    let aggs = (had_aggs || had_aggregations).then(|| {
+        let mut body = original.clone();
+        body.post_filter = None;
+        body.size = 0;
+        body.from = 0;
+        let mut params = params.clone();
+        // Query-string paging overrides the body, and a second scroll context
+        // would leak: this search only reads the aggregations.
+        params.size = Some("0".to_string());
+        params.from = None;
+        params.scroll = None;
+        (params, body)
+    });
+    Some(PostFilterSplit { hits, aggs })
+}
+
+/// Run the split searches and answer with the hits of one and the
+/// aggregations of the other. An error from either is returned as it is.
+async fn search_with_post_filter(
+    state: AppState,
+    index: String,
+    params: EsSearchQueryParams,
+    principal: crate::auth::Principal,
+    split: PostFilterSplit,
+) -> Response {
+    let hits_search = search_routed(
+        state.clone(),
+        index.clone(),
+        params,
+        principal.clone(),
+        EsSearchJson(Some(split.hits)),
+    );
+    let Some((aggs_params, aggs_body)) = split.aggs else {
+        return hits_search.await;
+    };
+    let aggs_search = search_routed(
+        state,
+        index,
+        aggs_params,
+        principal,
+        EsSearchJson(Some(aggs_body)),
+    );
+    let (hits_response, aggs_response) = tokio::join!(Box::pin(hits_search), Box::pin(aggs_search));
+    if !hits_response.status().is_success() {
+        return hits_response;
+    }
+    if !aggs_response.status().is_success() {
+        return aggs_response;
+    }
+
+    let (mut parts, hits_body) = hits_response.into_parts();
+    let read = |body: axum::body::Body| async move {
+        axum::body::to_bytes(body, usize::MAX)
+            .await
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+    };
+    let (Some(mut merged), Some(aggs_value)) =
+        (read(hits_body).await, read(aggs_response.into_body()).await)
+    else {
+        return ApiError::new(xerj_common::XerjError::internal(
+            "post_filter: could not read the search responses to merge them",
+        ))
+        .into_response();
+    };
+    if let (Some(obj), Some(aggregations)) =
+        (merged.as_object_mut(), aggs_value.get("aggregations"))
+    {
+        obj.insert("aggregations".to_string(), aggregations.clone());
+    }
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, axum::body::Body::from(merged.to_string()))
+}
+
+#[cfg(test)]
+mod post_filter_split_tests {
+    use super::*;
+
+    fn body(v: Value) -> EsSearchJson {
+        EsSearchJson(Some(serde_json::from_value(v).expect("search body")))
+    }
+
+    #[test]
+    fn no_post_filter_is_left_alone() {
+        let params = EsSearchQueryParams::default();
+        assert!(split_post_filter(&params, &body(json!({"query": {"match_all": {}}}))).is_none());
+        assert!(split_post_filter(&params, &EsSearchJson(None)).is_none());
+    }
+
+    #[test]
+    fn hits_search_wraps_the_query_and_drops_aggregations() {
+        let params = EsSearchQueryParams::default();
+        let split = split_post_filter(
+            &params,
+            &body(json!({
+                "query": {"match": {"body": "alpha"}},
+                "post_filter": {"term": {"provenance": "draft"}},
+            })),
+        )
+        .expect("split");
+        assert_eq!(
+            split.hits.query,
+            Some(json!({"bool": {
+                "must": [{"match": {"body": "alpha"}}],
+                "filter": [{"term": {"provenance": "draft"}}],
+            }}))
+        );
+        assert!(split.hits.post_filter.is_none());
+        assert!(split.aggs.is_none(), "no aggregations, no second search");
+    }
+
+    #[test]
+    fn a_missing_query_is_match_all() {
+        let split = split_post_filter(
+            &EsSearchQueryParams::default(),
+            &body(json!({"post_filter": {"term": {"provenance": "draft"}}})),
+        )
+        .expect("split");
+        assert_eq!(
+            split.hits.query.unwrap()["bool"]["must"][0],
+            json!({"match_all": {}})
+        );
+    }
+
+    #[test]
+    fn aggregations_come_from_the_unfiltered_request_with_no_hits_and_no_scroll() {
+        let params = EsSearchQueryParams {
+            size: Some("25".into()),
+            from: Some("5".into()),
+            scroll: Some("1m".into()),
+            ..Default::default()
+        };
+        let split = split_post_filter(
+            &params,
+            &body(json!({
+                "query": {"match_all": {}},
+                "size": 25,
+                "post_filter": {"term": {"provenance": "draft"}},
+                "aggs": {"p": {"terms": {"field": "provenance"}}},
+            })),
+        )
+        .expect("split");
+        assert!(split.hits.aggs.is_none() && split.hits.aggregations.is_none());
+        let (aggs_params, aggs_body) = split.aggs.expect("an aggregation search");
+        assert!(aggs_body.post_filter.is_none());
+        assert_eq!(aggs_body.query, Some(json!({"match_all": {}})));
+        assert_eq!((aggs_body.size, aggs_body.from), (0, 0));
+        assert!(aggs_body.aggs.is_some());
+        assert_eq!(aggs_params.size.as_deref(), Some("0"));
+        assert!(aggs_params.from.is_none() && aggs_params.scroll.is_none());
+    }
+
+    #[test]
+    fn hybrid_and_query_string_requests_are_not_split() {
+        let hybrid = body(json!({
+            "query": {"hybrid": {"queries": [
+                {"query": {"match": {"body": "alpha"}}},
+                {"query": {"match": {"body": "beta"}}},
+            ]}},
+            "post_filter": {"term": {"provenance": "draft"}},
+        }));
+        assert!(split_post_filter(&EsSearchQueryParams::default(), &hybrid).is_none());
+        let q_param = EsSearchQueryParams {
+            q: Some("body:alpha".into()),
+            ..Default::default()
+        };
+        let with_filter = body(json!({"post_filter": {"term": {"provenance": "draft"}}}));
+        assert!(split_post_filter(&q_param, &with_filter).is_none());
+    }
 }
 
 /// One shard's search, used by the cluster fan-out. Does not fan out again.
@@ -18718,7 +19142,22 @@ async fn search_impl(
             // and name the values that do exist. Only on zero hits, only for
             // exact clauses, and capped — this must never cost anything on a
             // query that worked.
-            if all_hints.is_empty() && hits.is_empty() {
+            //
+            // #2451: "zero hits" means the MATCH SET is empty, not the page. A
+            // `size: 0` request (a count or existence probe — autoindex's
+            // per-upsert `index_holds_content` is one) always has an empty
+            // page, so gating on `hits.is_empty()` alone ran the 256-row
+            // `match_all` sample — a full-source decode of ~356 rows, 1.4 s on
+            // a 234k-doc code index — after EVERY probe, hit or miss. The
+            // sample is for a caller who asked for hits and got none.
+            if all_hints.is_empty()
+                && zero_hit_value_sample_applies(
+                    body.size,
+                    hits.is_empty(),
+                    total_count,
+                    track_total_disabled,
+                )
+            {
                 let mut clauses = Vec::new();
                 if let Some(q) = body.query.as_ref() {
                     exact_term_clauses(q, &mut clauses);
@@ -20706,6 +21145,7 @@ fn bulk_item_error_type(e: &str) -> &'static str {
         || e.contains("missing document body")
         || e.contains("unknown action type")
         || e.contains("no write index is defined")
+        || e.contains("has more than one write index")
         || e.starts_with("pipeline with id")
     {
         "illegal_argument_exception"
@@ -23192,6 +23632,10 @@ pub async fn update_doc(
     Query(query_params): Query<UpdateDocParams>,
     body: bytes::Bytes,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     // Before `get_or_create_index`, so a refused body does not create an
     // index and does not read or write the document.
     let body = match parse_update_body(&body) {
@@ -24094,6 +24538,10 @@ pub async fn head_doc(
     State(state): State<AppState>,
     Path((index, id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    let index = match write_target_or_refusal(&state, &index) {
+        Ok(index) => index,
+        Err(resp) => return resp,
+    };
     let idx = match state.engine.get_index(&index) {
         Ok(i) => i,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),

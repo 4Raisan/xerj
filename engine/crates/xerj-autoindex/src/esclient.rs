@@ -726,7 +726,7 @@ pub const SEARCH_PAGE_TIMEOUT: &str = "120s";
 /// 12-minute ceiling per page — enough to ride out a merge or a breaker
 /// drain, short enough to fail a genuinely wedged node within a run's
 /// patience (the bulk patience is 600 s, `THROTTLE_PATIENCE`).
-const PARTIAL_PAGE_ATTEMPTS: usize = 6;
+pub(crate) const PARTIAL_PAGE_ATTEMPTS: usize = 6;
 
 /// What this run has learned about how large a `_bulk` request the server
 /// takes, shared by every clone of a client like [`BulkAdmission`].
@@ -1188,6 +1188,23 @@ fn with_single_wal_shard(body: &Value) -> Value {
     body
 }
 
+/// HTTP client for one XERJ node.
+///
+/// A loopback URL (`127.0.0.1`, `localhost`, `::1`, `0.0.0.0` — the same
+/// hosts as [`xerj_common::localauth::url_is_loopback`]) skips
+/// `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`. reqwest would otherwise send
+/// `127.0.0.1` through them, and a proxy that cannot reach loopback answers
+/// HTTP 503 while the node is up (#2379). A non-loopback URL keeps those
+/// variables, including `NO_PROXY`.
+pub(crate) fn node_blocking_builder(url: &str) -> reqwest::blocking::ClientBuilder {
+    let builder = reqwest::blocking::Client::builder();
+    if xerj_common::localauth::url_is_loopback(url) {
+        builder.no_proxy()
+    } else {
+        builder
+    }
+}
+
 impl Es {
     pub fn new(url: &str, api_key: Option<String>) -> Result<Self> {
         Self::with_bulk_timeout(url, api_key, 300)
@@ -1214,7 +1231,9 @@ impl Es {
         retry_initial_delay: Duration,
         retry_max_delay: Duration,
     ) -> Result<Self> {
-        let http = reqwest::blocking::Client::builder()
+        // Loopback skips HTTP(S)_PROXY / ALL_PROXY (#2379). A non-loopback
+        // URL keeps them, including NO_PROXY. Same rule as `xerj mcp`.
+        let http = node_blocking_builder(url)
             .timeout(Duration::from_secs(300))
             .danger_accept_invalid_certs(true)
             .build()
@@ -1889,7 +1908,9 @@ impl Es {
     /// 429/5xx retries the WHOLE request (`retry_loop`). A 200 whose items
     /// carry `status: 429` re-offers ONLY those items, after a backoff, for up
     /// to `throttle_patience` — the memory breaker's shape, see
-    /// [`THROTTLE_PATIENCE`]. A parent memory breaker that has not accepted a
+    /// [`THROTTLE_PATIENCE`]. The patience clock restarts whenever a round
+    /// settles at least one item, so it bounds time without progress, not the
+    /// total time a draining window takes. A parent memory breaker that has not accepted a
     /// single item of this bulk stops at [`ZERO_PROGRESS_PATIENCE`] instead
     /// (#2238). Records the server took are never sent twice, and a record it
     /// refused for a reason waiting cannot fix (a per-item 400, 5xx, or a
@@ -1904,7 +1925,7 @@ impl Es {
         // applies, even if later rounds are all 429: a drain in progress
         // (#944 held 57 s) must be allowed to finish.
         let mut accepted_any = false;
-        let episode = Instant::now();
+        let mut episode = Instant::now();
         let mut delay = self.retry_initial_delay;
         let mut last_notice: Option<Instant> = None;
         loop {
@@ -1922,6 +1943,13 @@ impl Es {
             }
             if round.items > round.throttled.len() {
                 accepted_any = true;
+                // Patience is measured since the last progress, not since the
+                // first round: a window that settles at least one record per
+                // round is draining, and each such round restarts the clock
+                // and the backoff. Only rounds that settle nothing accumulate
+                // toward the limit below.
+                episode = Instant::now();
+                delay = self.retry_initial_delay;
             }
             // Only per-item 429s stand between this bulk and a clean
             // outcome. Wait while patience lasts; after that the caller gets
@@ -2275,13 +2303,25 @@ impl Es {
     }
 
     fn search_raw(&self, index: &str, body: &Value) -> Result<(reqwest::StatusCode, Value)> {
+        self.search_raw_at(index, "", body)
+    }
+
+    fn search_raw_at(
+        &self,
+        index: &str,
+        query_string: &str,
+        body: &Value,
+    ) -> Result<(reqwest::StatusCode, Value)> {
         self.with_retry(
             "search",
             || {
-                self.req(reqwest::Method::POST, &format!("/{index}/_search"))
-                    .json(body)
-                    .send()
-                    .map_err(|e| anyhow!("search: {e}"))
+                self.req(
+                    reqwest::Method::POST,
+                    &format!("/{index}/_search{query_string}"),
+                )
+                .json(body)
+                .send()
+                .map_err(|e| anyhow!("search: {e}"))
             },
             |resp| {
                 let status = resp.status();
@@ -2293,6 +2333,19 @@ impl Es {
 
     pub fn search(&self, index: &str, body: &Value) -> Result<Value> {
         let (status, v) = self.search_raw(index, body)?;
+        if !status.is_success() {
+            return Err(anyhow!("search /{index} HTTP {status}: {v}"));
+        }
+        Ok(v)
+    }
+
+    /// [`Es::search`] for a caller that never reads the node's `_savings`
+    /// statistic (`xerj search`). Measuring what a `_source` filter withheld
+    /// needs the whole stored document, so asking for it forces the node to
+    /// decode every column of every hit even when the body names the few
+    /// fields it prints (#2422/#2423).
+    pub fn search_without_savings(&self, index: &str, body: &Value) -> Result<Value> {
+        let (status, v) = self.search_raw_at(index, "?savings=false", body)?;
         if !status.is_success() {
             return Err(anyhow!("search /{index} HTTP {status}: {v}"));
         }
@@ -2393,6 +2446,43 @@ impl Es {
                 }
             }
         }
+    }
+
+    /// [`Es::search_for_verify`] carrying [`Es::search_page`]'s deadline and
+    /// bounded retry. The finalize-verify windows treated the first partial
+    /// `timed_out` page as fatal — exit 1 on a 92-dataset corpus whose
+    /// documents were all indexed (#2405) — while the same answer on a
+    /// walked page has been re-asked since #1212. The body gets the page
+    /// timeout when the caller set none and the SAME window is re-asked
+    /// while the node answers `timed_out`, bounded by
+    /// [`PARTIAL_PAGE_ATTEMPTS`]. Every attempt still goes through
+    /// `search_for_verify`, so a target deleted mid-window (#2222) ends the
+    /// wait at once, and a window that never completes bails loud rather
+    /// than being counted as zero (#1761).
+    pub(crate) fn search_page_for_verify(&self, index: &str, body: &Value) -> Result<Value> {
+        let mut body = body.clone();
+        body.as_object_mut()
+            .context("search page body must be a JSON object")?
+            .entry("timeout")
+            .or_insert_with(|| Value::String(SEARCH_PAGE_TIMEOUT.to_owned()));
+        for attempt in 1..=PARTIAL_PAGE_ATTEMPTS {
+            let response = self.search_for_verify(index, &body)?;
+            if response.get("timed_out") != Some(&Value::Bool(true)) {
+                return Ok(response);
+            }
+            if attempt == PARTIAL_PAGE_ATTEMPTS {
+                anyhow::bail!(
+                    "finalize-verify search on {index} answered partial (timed_out) on \
+                     {PARTIAL_PAGE_ATTEMPTS} consecutive attempts at timeout \
+                     {SEARCH_PAGE_TIMEOUT}: a partial page is not a live count \
+                     (a concurrent writer on this index can hold publication \
+                     across the deadline). Nothing from this window was \
+                     counted — reduce load on the node and rerun the same \
+                     command, which resumes"
+                );
+            }
+        }
+        unreachable!("the attempt loop returns on its final iteration")
     }
 
     /// `Some(true)` the index is there, `Some(false)` the node answered 404,
@@ -4341,6 +4431,148 @@ mod tests {
             "{outcome:?}"
         );
         assert!(outcome.throttled_out >= 1, "{outcome:?}");
+    }
+
+    /// A window the server drains one record per round (the rest 429, as an
+    /// embedding deadline slice does) must finish even when the rounds
+    /// together outlast the patience: the clock is time since the last
+    /// progress, not since the first round.
+    #[test]
+    fn patience_restarts_whenever_a_round_settles_an_item() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_rounds = Arc::clone(&rounds);
+        let accepted = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let server_accepted = Arc::clone(&accepted);
+        let server = std::thread::spawn(move || loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream.set_nonblocking(false).unwrap();
+                    let request = read_request(&mut stream);
+                    let actions = request_body(&request)
+                        .split(|b| *b == b'\n')
+                        .filter(|line| !line.is_empty())
+                        .count()
+                        / 2;
+                    let offered: Vec<String> = request_body(&request)
+                        .split(|b| *b == b'\n')
+                        .filter(|line| !line.is_empty())
+                        .step_by(2)
+                        .map(|line| {
+                            let action: serde_json::Value = serde_json::from_slice(line).unwrap();
+                            action["index"]["_id"].as_str().unwrap().to_owned()
+                        })
+                        .collect();
+                    {
+                        let mut accepted = server_accepted.lock().unwrap();
+                        assert!(
+                            offered.iter().all(|id| !accepted.contains(id)),
+                            "accepted records were re-offered"
+                        );
+                        accepted.push(offered[0].clone());
+                    }
+                    server_rounds.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(60));
+                    let mut statuses = vec![429u16; actions];
+                    statuses[0] = 201;
+                    items_answered(&mut stream, &statuses);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if server_stop.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(2));
+                }
+                Err(error) => panic!("accept: {error}"),
+            }
+        });
+        let es = client(address, 4).with_throttle_patience(Duration::from_millis(200));
+        let ids = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j"];
+        let body: Vec<u8> = ids.iter().flat_map(|id| pair(id)).collect();
+        let started = Instant::now();
+        let outcome = es.bulk(body).unwrap();
+        let elapsed = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert_eq!(*accepted.lock().unwrap(), ids);
+        assert_eq!(outcome.server_errors, 0, "{outcome:?}");
+        assert_eq!(outcome.throttled_out, 0, "{outcome:?}");
+        assert!(outcome.exhausted_after.is_none(), "{outcome:?}");
+        assert_eq!(
+            rounds.load(Ordering::SeqCst),
+            10,
+            "one record settled per round"
+        );
+        assert!(
+            elapsed > Duration::from_millis(200),
+            "the test is only meaningful if the whole window outlasts the patience: {elapsed:?}"
+        );
+    }
+
+    /// The other half: progress restarts the clock, silence does not. After
+    /// three rounds that each settle a record, a server answering 429 for
+    /// everything still ends the window at the patience, measured from the
+    /// last round that settled anything.
+    #[test]
+    fn patience_still_ends_a_window_that_stops_making_progress() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let server_stop = Arc::clone(&stop);
+        let server = std::thread::spawn(move || {
+            let mut round = 0usize;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        let request = read_request(&mut stream);
+                        let actions = request_body(&request)
+                            .split(|b| *b == b'\n')
+                            .filter(|line| !line.is_empty())
+                            .count()
+                            / 2;
+                        round += 1;
+                        let mut statuses = vec![429u16; actions];
+                        if round <= 3 {
+                            statuses[0] = 201;
+                        }
+                        items_answered(&mut stream, &statuses);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        if server_stop.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        std::thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                }
+            }
+        });
+        let es = client(address, 4).with_throttle_patience(Duration::from_millis(300));
+        let body: Vec<u8> = ["a", "b", "c", "d", "e"]
+            .iter()
+            .flat_map(|id| pair(id))
+            .collect();
+        let started = Instant::now();
+        let outcome = es.bulk(body).unwrap();
+        let elapsed = started.elapsed();
+        stop.store(true, Ordering::SeqCst);
+        server.join().unwrap();
+        assert_eq!(
+            outcome.exhausted_after,
+            Some(Duration::from_millis(300)),
+            "{outcome:?}"
+        );
+        assert_eq!(outcome.throttled_out, 2, "{outcome:?}");
+        assert!(
+            elapsed >= Duration::from_millis(300),
+            "stopped at the patience after the last progress, took {elapsed:?}"
+        );
     }
 
     #[test]

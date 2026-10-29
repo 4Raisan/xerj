@@ -2,7 +2,7 @@
 use std::io::Read;
 use std::time::Duration;
 
-use crate::{batch, resolve_auth, Ctx, DEFAULT_XERJ_URL};
+use crate::{batch, node_http_builder, resolve_auth, Ctx, DEFAULT_XERJ_URL};
 
 const HELP: &str = "xerj batch-search — ordered batch retrieval (#1801)
 
@@ -15,6 +15,7 @@ Read one JSON object (at most 1 MiB) using the xerj_batch_search schema:
   ]}
 
 queries: 1..50 objects, each query (text or ES query clause) OR identifier+field.
+A plain string item is shorthand for {\"query\": <string>}.
 Exact identifiers require a flat indexed keyword field. index/prefix, size
 (1..50, default 3) and optional max_tokens are shared by all items.
 Output is one JSON object with ordered results; position is zero-based and
@@ -124,7 +125,7 @@ pub async fn run_batch_cli(args: &[String]) -> i32 {
             path.display()
         );
     }
-    let client = match reqwest::Client::builder()
+    let client = match node_http_builder(&base_url)
         .timeout(Duration::from_secs(30))
         .build()
     {

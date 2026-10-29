@@ -7,6 +7,8 @@ logs, JSONL/CSV and PDFs for BM25 full-text, vector and hybrid search, code sear
 memory, behind an Elasticsearch-compatible API. Works with Claude Code, Cursor and any MCP client.
 
 <a href="https://trendshift.io/repositories/116361?utm_source=repository-badge&amp;utm_medium=badge&amp;utm_campaign=badge-repository-116361" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/repositories/116361" alt="xerj-org%2Fxerj | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/116361#achievements" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/116361/daily?language=Rust" alt="XERJ | #1 Rust Repository Of The Day | Trendshift" width="250" height="55"/></a>
+<a href="https://trendshift.io/repositories/116361#achievements" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/116361/weekly?language=Rust" alt="XERJ | #1 Rust Repository Of The Week | Trendshift" width="250" height="55"/></a>
 
 [English](./README.md) | [简体中文](./README.zh-CN.md) | [日本語](./README.ja-JP.md) | [العربية](./README.ar.md) | [Español](./README.es.md) | [한국어](./README.ko.md)
 
@@ -66,6 +68,12 @@ or MCP `xerj_batch_search`: [ordered results, citations and per-item errors](doc
 Keep that data directory outside any folder you will autoindex. `data/` is not in the
 built-in ignore list, so `--data-dir ./data` inside a tree you then index makes the node
 index its own storage.
+
+At startup, `Data dir` shows the resolved absolute path, `Data source` identifies
+the flag, selected config file or default, and `Data status` says whether this
+launch created the directory. A new directory can make an older node's indices
+or owner account appear missing: restart with the previous `--data-dir` or
+`--config`. XERJ does not discover or migrate other data directories automatically.
 
 Windows and a hand-verified install are under [Install by hand](#install-by-hand).
 
@@ -347,20 +355,27 @@ Twenty-six clients can register `xerj mcp` as a local stdio server. The entry is
 two fields - the absolute path to the binary, and `mcp` as its only argument - but where that entry
 lives and which key wraps it differ per client. `tested` means the server was registered in that
 client and `xerj_search` appeared in its tool list; `untested` means the path and shape are
-transcribed from the client's own documentation and nobody has run it yet. Two rows have been run.
+transcribed from the client's own documentation and nobody has run it yet. Four rows have been run.
 OpenCode v2.1.2 on Windows against `xerj` v1.0.0-rc.97 answered `initialize` and `tools/list`
 with its full tool list. Cline CLI 3.0.73 on Linux against `xerj` v1.0.0-rc.98 loaded this
 section's `mcpServers` block at `~/.cline/data/settings/cline_mcp_settings.json`. `xerj_search`
 appeared in the tool list Cline handed the model (named `xerj__xerj_search`) among that binary's
 20 tools, and Cline executed one `xerj_search` call. The model turn was a local OpenAI-compatible
 stub, because no provider key was available; the MCP server was the real `xerj mcp` process. The
-IDE's MCP Servers > Configure button was not part of that run. Correcting an `untested` row is a
+IDE's MCP Servers > Configure button was not part of that run. Kimi Code CLI 2.3.1 and the Kimi
+desktop app on Linux against `xerj` v1.0.0-rc.99 (built from source) loaded this section's
+`mcpServers` block at `~/.kimi-code/mcp.json`: the client spawned `xerj mcp` as a child process
+with the `env` block intact (verified through `/proc/<pid>/environ`), and `xerj_search` appeared
+in the tool list. Claude Code 2.1.311 on Kali Linux against `xerj` v1.0.0-rc.100 registered
+`xerj mcp` with `claude mcp add` in the local, project and user scopes; `xerj_search` appeared in
+`/mcp` among that binary's 22 tools, and Claude Code executed one `xerj_search` and one `xerj_def`
+call against an autoindexed repository. Correcting an `untested` row is a
 welcome first PR.
 
 | Client | Config file | Key | Note | Tested |
 |---|---|---|---|---|
 | OpenCode | `opencode.json` in the project, or `~/.config/opencode/opencode.json` | `mcp.servers` | one command array, `environment` not `env`, needs a project root | tested |
-| Claude Code | `.mcp.json` (project) or `~/.claude.json` (user); `claude mcp add` writes either | `mcpServers` | `--` before the command is required | untested |
+| Claude Code | `.mcp.json` (project scope) or `~/.claude.json` (local scope, the default, or user scope); `claude mcp add` writes any of them | `mcpServers` | `--` before the command is recommended; `xerj mcp` also registers without it | tested |
 | Cursor | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` | `mcpServers` | no `type` for stdio | untested |
 | Codex | `~/.codex/config.toml`, or `.codex/config.toml` in trusted projects | `[mcp_servers.xerj]` | TOML, not JSON | untested |
 | Gemini CLI | `.gemini/settings.json` or `~/.gemini/settings.json` | `mcpServers` | `gemini trust` the folder or stdio shows Disconnected | untested |
@@ -383,7 +398,7 @@ welcome first PR.
 | Warp | Settings > Agents > MCP servers, or `~/.warp/.mcp.json` and `.warp/.mcp.json` in the project | `mcpServers` | `working_directory`, not `cwd` | untested |
 | Augment Code | `~/.augment/settings.json` for the Auggie CLI; the IDE uses its own panel | `mcpServers` | that file does not drive the IDE | untested |
 | Qwen Code | `~/.qwen/settings.json`, or `.qwen/settings.json` in the project | `mcpServers` | `mcp.allowed` can silently hide it | untested |
-| Kimi CLI | `~/.kimi-code/mcp.json`, or `.kimi-code/mcp.json` in the project | `mcpServers` | the current Kimi Code CLI, not the archived `~/.kimi/mcp.json` | untested |
+| Kimi CLI | `~/.kimi-code/mcp.json`, or `.kimi-code/mcp.json` in the project | `mcpServers` | the current Kimi Code CLI, not the archived `~/.kimi/mcp.json` | tested |
 | Grok CLI | `~/.grok/config.toml`, or `.grok/config.toml` in the project | `[mcp_servers.xerj]` | Grok Bot has no local stdio registration | untested |
 
 Codex and the Grok CLI read TOML, so the entry is a table:

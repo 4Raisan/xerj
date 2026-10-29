@@ -940,7 +940,12 @@ pub struct Engine {
     /// leave `LockFileEx` stuck on the file; `node_lock` reclaims it when
     /// the PID it records is not running, and logs that reclaim. A live
     /// holder still blocks a second start.
-    _node_lock: Arc<std::fs::File>,
+    ///
+    /// Drop unlocks explicitly (`NodeLock`) before close. A `fork` in another
+    /// thread inherits the descriptor until that child execs; close alone
+    /// does not release `flock` across that window, so a second engine on
+    /// this directory would refuse to start after the holder was dropped.
+    _node_lock: Arc<crate::node_lock::NodeLock>,
 
     /// Serializes rewrites of `<data_dir>/cluster_state.json` (issue #203).
     ///
@@ -1490,6 +1495,11 @@ impl Engine {
     pub(crate) fn apply_index_template(&self, name: &str, schema: Schema) -> Schema {
         let mut effective_schema = schema;
         let mut new_semantic_targets = Vec::new();
+        // #2407: a template's bare `semantic_text` is sized at the width this
+        // server's embedding backend actually produces, not always 384.
+        // Resolved once per create and only when a bare field appears, so a
+        // template without one never pays for the proxy width probe (#2306).
+        let mut confirmed_dimensions: Option<usize> = None;
         if let Some(tmpl) = self.best_matching_template(name) {
             if let Some(props) = tmpl.mappings.get("properties").and_then(Value::as_object) {
                 for (field_name, field_def) in props {
@@ -1500,7 +1510,18 @@ impl Engine {
                     {
                         continue;
                     }
-                    let fc = field_from_template_property(field_name, field_def);
+                    let bare_semantic = field_def.get("type").and_then(Value::as_str)
+                        == Some("semantic_text")
+                        && field_def.get("dimensions").is_none()
+                        && field_def.get("dims").is_none();
+                    let semantic_dimensions = if bare_semantic {
+                        *confirmed_dimensions
+                            .get_or_insert_with(|| self.confirmed_semantic_dimensions())
+                    } else {
+                        xerj_ai::local::DEFAULT_DIMS
+                    };
+                    let fc =
+                        field_from_template_property(field_name, field_def, semantic_dimensions);
                     if let Some(embedding) = fc.embedding.as_ref() {
                         new_semantic_targets.push(
                             embedding
@@ -3313,6 +3334,46 @@ impl Engine {
         vec![name.to_string()]
     }
 
+    /// The concrete index a write to `name` must target when `name` is an
+    /// alias: a single backing index, or exactly one marked
+    /// `is_write_index: true`. `Ok(None)` means `name` is not an alias (a
+    /// concrete index or a name the caller may auto-create). More than one
+    /// candidate is ambiguous and refused with ES's message.
+    ///
+    /// `get_index` deliberately resolves an alias to its FIRST backing index,
+    /// which is fine for reads by name but wrong for a write: a two-index
+    /// alias silently sent the document to whichever member was listed first,
+    /// ignoring `is_write_index`. Write paths resolve through this function
+    /// before they touch a mapping, pipeline, or store.
+    pub fn write_target(&self, name: &str) -> std::result::Result<Option<String>, String> {
+        let Some(backings) = self.aliases.get(name) else {
+            return Ok(None);
+        };
+        if backings.len() == 1 {
+            return Ok(Some(backings[0].clone()));
+        }
+        let mut writes = backings.iter().filter(|backing| {
+            let Some(meta) = self.index_alias_metadata.get(backing.as_str()) else {
+                return false;
+            };
+            meta.get(name)
+                .and_then(|alias_meta| alias_meta.get("is_write_index"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        });
+        let first = writes.next().cloned();
+        let second = writes.next();
+        match (first, second) {
+            (Some(target), None) => Ok(Some(target)),
+            (None, _) => Err(format!(
+                "no write index is defined for alias [{name}]. The write index may be \
+                 explicitly disabled using is_write_index=false or the alias points to \
+                 multiple indices without one being designated as a write index"
+            )),
+            (Some(_), Some(_)) => Err(format!("alias [{name}] has more than one write index")),
+        }
+    }
+
     /// Delete an index and all its data.
     ///
     /// Also drops any aliases that pointed only at this index (matching ES
@@ -3971,11 +4032,11 @@ impl Engine {
     /// blanket refusal.
     pub async fn list_indices(&self) -> Vec<IndexInfo> {
         let mut list = Vec::new();
-        for entry in self.indices.iter() {
-            if !crate::index_guard::visible(entry.key()) {
+        for (name, idx) in self.open_index_handles() {
+            if !crate::index_guard::visible(&name) {
                 continue;
             }
-            let stats = entry.value().stats().await;
+            let stats = idx.stats().await;
             list.push(IndexInfo {
                 name: stats.name,
                 doc_count: stats.doc_count,
@@ -3984,6 +4045,17 @@ impl Engine {
             });
         }
         list
+    }
+
+    /// Snapshot handles for read-only statistics, releasing every DashMap
+    /// iterator guard before awaiting an index. A stalled schema lock must
+    /// not hold the map shard against an index deletion or insertion (#2405).
+    /// This preserves the existing observational (non-atomic) stats contract.
+    fn open_index_handles(&self) -> Vec<(String, Arc<Index>)> {
+        self.indices
+            .iter()
+            .map(|entry| (entry.key().clone(), Arc::clone(entry.value())))
+            .collect()
     }
 
     /// Get the stats for a single index.
@@ -4072,8 +4144,8 @@ impl Engine {
         let mut total_docs = 0u64;
         let mut has_memtable_only = false;
 
-        for entry in self.indices.iter() {
-            let stats = entry.value().stats().await;
+        for (_, idx) in self.open_index_handles() {
+            let stats = idx.stats().await;
             total_docs += stats.doc_count;
             // Yellow condition: any index has in-memory data that hasn't been
             // flushed to a segment yet.
@@ -4314,6 +4386,26 @@ impl Engine {
 
     /// Return the effective embedding identity without exposing configuration
     /// secrets or local asset paths.
+    /// The width a bare `semantic_text` is sized at (#2407): the backend's
+    /// confirmed width when one exists, else the built-in default, with a
+    /// warning, since that fallback only matches a 384-wide backend.
+    pub fn confirmed_semantic_dimensions(&self) -> usize {
+        let unconfirmed = match self.embedding_execution_identity() {
+            Ok(identity) => match identity.dimensions {
+                Some(dimensions) => return dimensions,
+                None => format!("the {} backend has not confirmed a width", identity.backend),
+            },
+            Err(error) => error.to_string(),
+        };
+        warn!(
+            reason = %unconfirmed,
+            fallback = xerj_ai::local::DEFAULT_DIMS,
+            "bare semantic_text sized at the built-in default width; declare `dimensions` \
+             if the embedding backend returns another width"
+        );
+        xerj_ai::local::DEFAULT_DIMS
+    }
+
     pub fn embedding_execution_identity(&self) -> Result<EmbeddingExecutionIdentity> {
         // #2306: a proxy resume needs a confirmed vector width. The probe runs
         // here, on the identity request autoindex makes before it writes, and
@@ -5570,7 +5662,11 @@ fn merge_template_settings(template: &Value, request: Value) -> Value {
 /// One template property, in the same native shape `es_properties_to_fields`
 /// builds for an explicit mapping. `semantic_text` is text plus an embedding
 /// contract — not `object` (#2281).
-fn field_from_template_property(name: &str, field_def: &Value) -> xerj_common::types::FieldConfig {
+fn field_from_template_property(
+    name: &str,
+    field_def: &Value,
+    semantic_dimensions: usize,
+) -> xerj_common::types::FieldConfig {
     use xerj_common::types::{EmbeddingConfig, FieldConfig, FieldType};
     let es_type = field_def
         .get("type")
@@ -5595,7 +5691,7 @@ fn field_from_template_property(name: &str, field_def: &Value) -> xerj_common::t
             .or_else(|| field_def.get("dims"))
             .and_then(Value::as_u64)
             .map(|d| d as usize)
-            .unwrap_or(xerj_ai::local::DEFAULT_DIMS);
+            .unwrap_or(semantic_dimensions);
         fc.options.dimensions = Some(dims);
         fc.options.similarity = Some(
             field_def
@@ -6222,6 +6318,7 @@ mod index_template_merge_tests {
         let semantic = field_from_template_property(
             "diagnostic_semantic",
             &json!({ "type": "semantic_text" }),
+            768, // #2407: a bare semantic_text takes the caller's backend width
         );
         assert_eq!(semantic.field_type, FieldType::Text);
         assert!(!semantic.options.doc_values);
@@ -6230,11 +6327,12 @@ mod index_template_merge_tests {
             embedding.target_field.as_deref(),
             Some("diagnostic_semantic_vector")
         );
-        assert_eq!(semantic.options.dimensions, Some(384));
+        assert_eq!(semantic.options.dimensions, Some(768));
 
         let keyword = field_from_template_property(
             "diagnostic_template_marker",
             &json!({ "type": "keyword" }),
+            xerj_ai::local::DEFAULT_DIMS,
         );
         assert_eq!(keyword.field_type, FieldType::Keyword);
         assert!(keyword.embedding.is_none());

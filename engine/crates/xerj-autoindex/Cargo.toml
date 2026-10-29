@@ -10,6 +10,9 @@ description = "xerj autoindex — point it at any folder and make the contents A
 # The machine-resource policy (cores, memory safe zone, thread priority) is
 # shared with the server: one policy, one place (#240).
 xerj-common = { path = "../xerj-common" }
+# Session exports use the same native PII redactor as ingest pipelines.
+xerj-wasm = { path = "../xerj-wasm" }
+uuid.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -47,6 +50,8 @@ memchr.workspace = true
 rayon.workspace = true
 libc = "0.2"
 tempfile.workspace = true
+# Phase-B per-file stages are zstd-compressed (#2427, `stage.rs`).
+zstd.workspace = true
 fs2 = "0.4"
 # ES-compat HTTP client. Blocking mode: all of autoindex is synchronous
 # (std threads), invoked from the server binary via spawn_blocking.
