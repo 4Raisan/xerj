@@ -452,11 +452,10 @@ the list is written back into corpus.json;
 a local checkout's root .xerjignore is copied into the clone when it differs
 from the committed file (git clone drops an untracked or uncommitted one);
 a pinned --from rebuild stays exact and does not copy it, and says so;
-a local partial clone (git clone --filter=blob:none) is refused with its
-reason instead of being reported as corruption: its blobs are fetched on
-demand, so cloning from it fails inside upload-pack; index that checkout in
-place with 'xerj autoindex <path> --prefix <name>', or re-clone without
---filter and add that;
+if cloning a local partial clone fails, its promisor configuration is
+reported as a possible source of missing-object errors. Hydrated partial
+clones remain accepted. Index only already-present working-tree files with
+'xerj autoindex <path>', or use a complete clone as the corpus source;
 --from takes the corpus name from the manifest's 'corpus' field (or the
 pack's 'pack' field) unless <name> or --as overrides it; a harvested pack
 also checksum-verifies and materializes records per source; --verify-sig
@@ -991,56 +990,55 @@ fn local_checkout_root(url: &str) -> Option<PathBuf> {
     path.is_dir().then_some(path)
 }
 
-/// Why `src` is a partial clone, if it is one (#2576).
-///
-/// `git clone --filter=blob:none` leaves the blobs outside the checked-out
-/// paths unfetched and records a promisor remote to fetch them on demand. The
-/// working tree reads normally — which is why `xerj autoindex <that path>`
-/// works — but the checkout cannot serve as a clone *source*: upload-pack has
-/// to materialize every object at the tip, cannot, and dies with
-/// `unable to read sha1 file of …` or, on newer git, "repository corruption".
-/// Neither wording says "partial clone", so a valid checkout gets reported as
-/// a damaged one.
-///
-/// Detected from the config the filter writes, not by probing for absent
-/// objects: `extensions.partialClone` on current git, `remote.origin.promisor`
-/// on older ones. Both are written at clone time, so this costs two
-/// `git config` reads and no object walk.
+/// Partial-clone configuration is context for an observed clone failure,
+/// not proof that objects are missing. A hydrated source remains cloneable.
+/// Git supports multiple named promisor remotes, not only `origin`.
 fn partial_clone_cause(src: &Path) -> Option<String> {
-    let read = |key: &str| {
-        git(Some(src), &["config", "--get", key])
-            .ok()
-            .filter(|(rc, _)| *rc == 0)
-            .map(|(_, out)| out.trim().to_string())
-            .filter(|v| !v.is_empty())
+    let concise = |value: &str| {
+        value
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(120)
+            .collect::<String>()
     };
-    if let Some(v) = read("extensions.partialclone") {
-        return Some(format!("extensions.partialClone={v}"));
+    if let Ok((0, out, _)) = git_stdout(src, &["config", "--get", "extensions.partialclone"]) {
+        if !out.is_empty() {
+            return Some(format!("extensions.partialClone={}", concise(&out)));
+        }
     }
-    match read("remote.origin.promisor") {
-        Some(v) if v == "true" => Some("remote.origin.promisor=true".to_string()),
-        _ => None,
+    if let Ok((0, out, _)) = git_stdout(
+        src,
+        &[
+            "config",
+            "--type=bool",
+            "--get-regexp",
+            r"^remote\..*\.promisor$",
+        ],
+    ) {
+        for line in out.lines() {
+            if let Some(key) = line.strip_suffix(" true") {
+                return Some(format!("{}=true", concise(key)));
+            }
+        }
     }
+    None
 }
 
-/// The lines `corpus add` prints when it refuses a partial clone (#2576).
-///
-/// Split out from the loop so the wording is testable — the whole point of the
-/// issue is the message, and `eprintln!` cannot be captured in-process.
-fn partial_clone_refusal(repo_name: &str, src: &Path, cause: &str) -> Vec<String> {
+/// Advice is conditional and follows Git's actual failure. Quote the source
+/// path for the named shell; the partial working tree may cover only a subset.
+fn partial_clone_failure_hint(repo_name: &str, src: &Path, cause: &str) -> Vec<String> {
+    let path = src.to_string_lossy();
+    #[cfg(not(windows))]
+    let (shell, quoted) = (
+        "POSIX shell",
+        format!("'{}'", path.replace('\'', "'\"'\"'")),
+    );
+    #[cfg(windows)]
+    let (shell, quoted) = ("PowerShell", format!("'{}'", path.replace('\'', "''")));
     vec![
-        format!(
-            "  [FAIL] {repo_name}: {} is a partial clone ({cause}) — its blobs are fetched on \
-             demand, so cloning from it fails with a misleading \"repository corruption\"; \
-             continuing",
-            src.display()
-        ),
-        format!(
-            "xerj corpus add:   index the working tree in place: \
-             xerj autoindex {} --prefix {repo_name}",
-            src.display()
-        ),
-        "xerj corpus add:   or re-clone it without --filter and add that checkout".to_string(),
+        format!("xerj corpus add: the source has partial-clone configuration ({cause}); missing promised objects may explain this Git failure"),
+        format!("xerj corpus add: to index only files already present in its working tree ({shell}): xerj autoindex {quoted} --prefix {repo_name}"),
+        "xerj corpus add: for a complete corpus, restore access to the promisor remote or use a new clone made without --filter, then retry".to_string(),
     ]
 }
 
@@ -1559,19 +1557,6 @@ fn run_corpus_add(args: &[String]) -> i32 {
             );
             continue;
         }
-        // #2576: a partial clone has no blobs outside its checked-out paths,
-        // so cloning FROM it fails inside upload-pack — with git's "repository
-        // corruption" wording, which names the wrong problem. Refuse with the
-        // reason and the two ways forward, before git prints anything at all.
-        if let Some(src) = local_checkout_root(&url) {
-            if let Some(cause) = partial_clone_cause(&src) {
-                for line in partial_clone_refusal(&repo_name, &src, &cause) {
-                    eprintln!("{line}");
-                }
-                skipped.push(repo_name);
-                continue;
-            }
-        }
         println!("  [clone] {repo_name}");
         let cloned = stage_new_checkout(&target, |checkout| {
             if sha.is_empty() {
@@ -1583,7 +1568,15 @@ fn run_corpus_add(args: &[String]) -> i32 {
                         .chars()
                         .take(GIT_FETCH_OUTPUT_CAP)
                         .collect();
-                    anyhow::bail!("git clone failed (exit {rc}): {shown}");
+                    let hint = local_checkout_root(&url)
+                        .and_then(|src| {
+                            partial_clone_cause(&src).map(|cause| {
+                                partial_clone_failure_hint(&repo_name, &src, &cause).join("\n")
+                            })
+                        })
+                        .map(|lines| format!("\n{lines}"))
+                        .unwrap_or_default();
+                    anyhow::bail!("git clone failed (exit {rc}): {shown}{hint}");
                 }
                 Ok(())
             } else {
@@ -6232,7 +6225,7 @@ precedence = ["a", "b"]
         assert_eq!(
             partial_clone_cause(&repo).as_deref(),
             Some("remote.origin.promisor=true"),
-            "older git records the filter on the remote"
+            "Git records the promisor property on a named remote"
         );
 
         let (rc, _) = git(
@@ -6244,94 +6237,110 @@ precedence = ["a", "b"]
         assert_eq!(
             partial_clone_cause(&repo).as_deref(),
             Some("extensions.partialClone=origin"),
-            "current git records it in extensions, and that is the one reported"
+            "the optional extension records a promisor remote name"
         );
     }
 
-    /// #2576: `git clone --filter=blob:none` leaves the blobs outside the
-    /// checked-out paths unfetched, so a clone *from* that checkout fails inside
-    /// upload-pack — with git's "repository corruption" wording, which names
-    /// the wrong problem and sends the reader looking for a damaged repo. The
-    /// checkout is valid: `xerj autoindex` reads it. Refuse it by name and
-    /// point at the command that works.
+    /// Real missing objects plus an unavailable promisor remote cause a
+    /// clone failure. Restoring and hydrating the source makes a retry work.
     #[test]
-    fn corpus_add_refuses_a_partial_clone_by_name_instead_of_calling_it_corrupt() {
+    fn corpus_add_partial_clone_failure_preserves_retry_and_names_the_context() {
         let home = tempfile::tempdir().unwrap();
         let _h = code_home(home.path());
         let origin = home.path().join("origin");
         init_committed_repo(&origin, &[("src/keep.txt", "tracked\n")]);
-        let (rc, out) = git(Some(&origin), &["config", "uploadpack.allowFilter", "true"]).unwrap();
-        assert_eq!(rc, 0, "{out}");
-
+        assert_eq!(
+            git(Some(&origin), &["config", "uploadpack.allowFilter", "true"])
+                .unwrap()
+                .0,
+            0
+        );
         let partial = home.path().join("partial");
         let (rc, out) = git(
             None,
             &[
                 "clone",
-                "--quiet",
                 "--filter=blob:none",
-                "--sparse",
+                "--no-checkout",
                 &format!("file://{}", origin.display()),
                 &partial.display().to_string(),
             ],
         )
         .unwrap();
-        assert_eq!(rc, 0, "the fixture must clone: {out}");
-        let (rc, promisor) = git(
-            Some(&partial),
-            &["config", "--get", "remote.origin.promisor"],
+        assert_eq!(rc, 0, "{out}");
+        let (rc, missing, err) = git_stdout(
+            &partial,
+            &["rev-list", "--objects", "--all", "--missing=print"],
         )
         .unwrap();
-        assert_eq!(rc, 0, "the fixture must be a partial clone: {promisor}");
-
-        // The premise, not the fix: cloning FROM it is what fails, and with a
-        // message that never says "partial".
-        let (clone_rc, clone_out) = git(
-            None,
-            &[
-                "clone",
-                "--depth",
-                "1",
-                "--quiet",
-                &partial.display().to_string(),
-                &home.path().join("would-be-clone").display().to_string(),
-            ],
-        )
-        .unwrap();
-        assert_ne!(
-            clone_rc, 0,
-            "if this ever succeeds, the guard is unnecessary: {clone_out}"
+        assert_eq!(rc, 0, "{err}");
+        assert!(
+            missing.lines().any(|line| line.starts_with('?')),
+            "fixture needs missing objects: {missing}"
         );
-
+        std::fs::rename(&origin, home.path().join("offline-origin")).unwrap();
+        let args = vec!["partial-corpus".into(), partial.display().to_string()];
+        assert_eq!(run_corpus_add(&args), 1);
         assert_eq!(
-            run_corpus_add(&["partial-corpus".into(), partial.display().to_string()]),
-            1,
-            "a corpus whose only source was refused has nothing cloned"
+            std::fs::read_dir(home.path().join("corpora/partial-corpus"))
+                .unwrap()
+                .count(),
+            0,
+            "failed clone cannot publish a partial target"
         );
-        assert!(
-            !home.path().join("corpora/partial-corpus/partial").exists(),
-            "the refused source must not leave a half-clone behind"
-        );
-
-        // The message is the fix: it has to name the partial clone, name the
-        // config that proves it, and hand over a command that works. It must
-        // not repeat the two misdirections the issue was filed about.
-        let cause = partial_clone_cause(&partial).expect("the fixture is a partial clone");
-        let lines = partial_clone_refusal("partial", &partial, &cause).join("\n");
-        assert!(lines.contains("is a partial clone"), "{lines}");
+        let cause = partial_clone_cause(&partial).unwrap();
+        let lines = partial_clone_failure_hint("partial", &partial, &cause).join("\n");
+        assert!(lines.contains("partial-clone configuration"), "{lines}");
+        assert!(lines.contains("may explain"), "{lines}");
+        assert!(lines.contains("only files already present"), "{lines}");
         assert!(lines.contains(&cause), "{lines}");
-        assert!(
-            lines.contains(&format!(
-                "xerj autoindex {} --prefix partial",
-                partial.display()
-            )),
-            "the refusal must hand over the command that works: {lines}"
+        std::fs::rename(home.path().join("offline-origin"), &origin).unwrap();
+        let (rc, out) = git(Some(&partial), &["checkout", "HEAD", "--", "."]).unwrap();
+        assert_eq!(rc, 0, "hydrate after restoring the remote: {out}");
+        assert_eq!(run_corpus_add(&args), 0);
+        assert!(home
+            .path()
+            .join("corpora/partial-corpus/partial/src/keep.txt")
+            .is_file());
+    }
+
+    #[test]
+    fn partial_clone_cause_accepts_non_origin_promisors_and_git_boolean_spellings() {
+        let home = tempfile::tempdir().unwrap();
+        let repo = home.path().join("repo");
+        init_committed_repo(&repo, &[("keep.txt", "keep\n")]);
+        for value in ["yes", "1", "true"] {
+            assert_eq!(
+                git(Some(&repo), &["config", "remote.cache.promisor", value])
+                    .unwrap()
+                    .0,
+                0
+            );
+            assert_eq!(
+                partial_clone_cause(&repo).as_deref(),
+                Some("remote.cache.promisor=true")
+            );
+        }
+        assert_eq!(
+            git(Some(&repo), &["config", "remote.cache.promisor", "false"])
+                .unwrap()
+                .0,
+            0
         );
-        assert!(!lines.contains("could not clone"), "{lines}");
-        assert!(
-            lines.contains("misleading \"repository corruption\""),
-            "the old wording is quoted only to say it is wrong: {lines}"
-        );
+        assert!(partial_clone_cause(&repo).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn partial_clone_hint_quotes_source_paths_for_the_named_shell() {
+        let lines = partial_clone_failure_hint(
+            "sample",
+            Path::new("/tmp/a'b $(cmd)"),
+            "remote.origin.promisor=true",
+        )
+        .join("\n");
+        assert!(lines.contains("POSIX shell"));
+        assert!(lines.contains("'/tmp/a'\"'\"'b $(cmd)'"), "{lines}");
     }
 
     /// An untracked root `.xerjignore` has to be copied or the index sees
@@ -7504,5 +7513,58 @@ precedence = ["a", "b"]
             0
         );
         assert!(existing_checkout_is_complete(&repo));
+    }
+    #[test]
+    fn corpus_add_accepts_a_hydrated_partial_clone_source() {
+        let home = tempfile::tempdir().unwrap();
+        let _hold = code_home(home.path());
+        let origin = home.path().join("origin");
+        init_committed_repo(
+            &origin,
+            &[
+                ("src/a.txt", "source content\n"),
+                ("docs/b.txt", "documentation\n"),
+            ],
+        );
+        assert_eq!(
+            git(Some(&origin), &["config", "uploadpack.allowFilter", "true"])
+                .unwrap()
+                .0,
+            0
+        );
+        let partial = home.path().join("partial");
+        let url = format!("file://{}", origin.display());
+        let (rc, out) = git(
+            None,
+            &[
+                "clone",
+                "--filter=blob:none",
+                "--no-checkout",
+                &url,
+                &partial.display().to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(rc, 0, "{out}");
+        let (rc, out) = git(Some(&partial), &["checkout", "HEAD", "--", "."]).unwrap();
+        assert_eq!(rc, 0, "hydration: {out}");
+        assert!(
+            partial_clone_cause(&partial).is_some(),
+            "config remains after hydration"
+        );
+        assert_eq!(
+            run_corpus_add(&["hydrated".into(), partial.display().to_string()]),
+            0,
+            "promisor configuration is not proof that cloning will fail"
+        );
+        let target = home.path().join("corpora/hydrated/partial");
+        assert_eq!(
+            std::fs::read_to_string(target.join("src/a.txt")).unwrap(),
+            "source content\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(target.join("docs/b.txt")).unwrap(),
+            "documentation\n"
+        );
     }
 }
