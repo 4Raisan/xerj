@@ -176,3 +176,19 @@ Every returned hit had a checked index/ID citation; ranked evidence and
 citations matched across modes, transports and repeats. The index retained
 2,051 records before and after graceful restart. This is a small fixed
 known-item workload, not an estimate of general advisory QA accuracy.
+
+## Independent Linux verification: 2026-10-28
+
+[Linux receipts](results/2026-10-28-linux-x86_64.json) repeat the same pinned
+pack and workload with five measured repeats per arm, using a scoped release
+build of `4af41af87f86e036142503d0e38fc84e2a41bd81` (rc.100 plus the reviewed
+SQL/Markdown/empty-file fixes). All four arms passed 49/49 retrieval items in
+every repeat, kept the expected per-item validation error separate, and
+matched ranked evidence and citations. The node retained 2,051 records across
+graceful restart. Payload token totals matched the earlier macOS receipt.
+
+This was a shared Linux host; a separate conformance run also executed during
+this review. The receipt retains the observed timings, but this run does not
+isolate a version, platform, or throughput improvement. Wrong-archive and
+existing-output CLI controls also failed before publication, with exit 1 and
+exit 2 respectively; the existing-output sentinel remained unchanged.
