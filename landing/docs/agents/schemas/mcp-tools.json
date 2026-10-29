@@ -152,11 +152,12 @@
             "description": "Autoindex prefix, resolved by the same function as `xerj search --prefix` and `xerj autoindex --prefix`: lower-case [a-z0-9] runs joined by '-', so `project` searches `project-*` and `My_Proj` searches `my-proj-*`. A trailing `-*` is dropped. Whitespace is trimmed. An empty prefix, a prefix with no [a-z0-9] character, or a prefix that cannot name an index is an error before any request. Cannot be combined with a non-empty `index`. With neither argument, searches `ax-*` (the CLI default when `--prefix` is omitted)."
           },
           "query": {
-            "type": [
-              "object",
-              "string"
-            ],
-            "description": "Plain string (definition-first code search) or ES query-DSL clause. Omit for match_all."
+            "type": "string",
+            "description": "What to search for, in plain words — the definition-first code search `xerj search` runs. REQUIRED unless you pass `query_dsl` instead."
+          },
+          "query_dsl": {
+            "type": "object",
+            "description": "An Elasticsearch query-DSL clause, used INSTEAD of `query` when the search needs structure plain words cannot express — a `filter`, a `bool`, a `knn`, a field-scoped `match`, an explicit `match_all`. Cannot be combined with `query`. The engine's own order is kept."
           },
           "size": {
             "type": "integer",
