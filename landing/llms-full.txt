@@ -533,6 +533,11 @@ character class. The class reading stays: `*.[ch]` still matches `.c` and
 `.h`. The ignore summary names a route-like class, a pruned `[…]` directory,
 and each skipped code file with its rule.
 
+With `reason=stale-resume-plan`, exit 3 carries `ok=false`: files added after
+the resume plan was frozen were not indexed. `skipped_appeared` counts them;
+re-run with `--fresh` to rebuild the plan in place. Existing indexed files stay
+searchable. This is separate from the completed-with-junk outcome below.
+
 Exit codes: 0 complete (also: the gate was answered `--approve cancel`) ·
 3 completed-with-junk (junk recorded, never fatal — this is SUCCESS, do not report
 it as a failure; it INCLUDES a whole dataset whose mapping the server refused with an

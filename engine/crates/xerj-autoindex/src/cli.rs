@@ -689,22 +689,17 @@ pub fn help_text_with(feedback: bool) -> String {
          \n\
          RESUME POLICY:\n\
          \x20\x20\x20\x20{resume_policy_help}.\n\
-         \x20\x20\x20\x20On a graph-enabled or pre-generation journal the durable plan supports no-op\n\
-         \x20\x20\x20\x20resume and same-path content replacement. Files added after that plan was frozen\n\
-         \x20\x20\x20\x20are reported as skipped and are not indexed; --fresh rebuilds the plan in place\n\
-         \x20\x20\x20\x20and picks them up. Removing an indexed file is refused there before any remote\n\
-         \x20\x20\x20\x20mutation: its documents are already live and nothing on that path deletes them.\n\
-         \x20\x20\x20\x20Restore the file and rerun, or rebuild — in place by deleting the published\n\
-         \x20\x20\x20\x20indices and the state directory, or isolated under a new --state-dir, --prefix\n\
-         \x20\x20\x20\x20and --brain (or --no-graph), validated before you switch readers.\n\
-         \x20\x20\x20\x20--fresh is not a destination wipe. A file that is still present and whose\n\
-         \x20\x20\x20\x20content key changed is republished, and the documents previously published\n\
-         \x20\x20\x20\x20for that path are removed. A disappeared file is still refused before any\n\
-         \x20\x20\x20\x20remote mutation, and its documents stay. --fresh is refused outright once a\n\
-         \x20\x20\x20\x20durable corpus generation exists (re-run without it — the generated path\n\
-         \x20\x20\x20\x20reconciles the change incrementally). For an independent rebuild use a new\n\
-         \x20\x20\x20\x20--state-dir and a new --prefix, plus a new --brain when graph is enabled\n\
-         \x20\x20\x20\x20(or --no-graph).\n\
+         \x20\x20\x20\x20On a graph-enabled journal, unchanged runs and same-path replacements\n\
+         \x20\x20\x20\x20reuse the durable plan. Added files that fit a frozen dataset are indexed;\n\
+         \x20\x20\x20\x20files needing a new dataset report exit 3, stale-resume-plan and ok=false.\n\
+         \x20\x20\x20\x20Use --fresh to rebuild that graph plan and include them. Removed files\n\
+         \x20\x20\x20\x20are swept with reason=files-removed. A wider exclusion rule requires\n\
+         \x20\x20\x20\x20--drop-indexed approval before its previously indexed documents are swept.\n\
+         \x20\x20\x20\x20--fresh is not a destination wipe. It is refused once a durable corpus\n\
+         \x20\x20\x20\x20generation exists: rerun without it to reconcile changes incrementally.\n\
+         \x20\x20\x20\x20A pre-generation --no-graph journal needs an isolated rebuild under a new\n\
+         \x20\x20\x20\x20--state-dir and --prefix. For any independent graph rebuild also use a new\n\
+         \x20\x20\x20\x20--brain (or --no-graph).\n\
          \x20\x20\x20\x20Validate before switching readers; explicitly clean the shared\n\
          \x20\x20\x20\x20autoindex-catalog and old target only after validation.\n\
          \n\
@@ -781,7 +776,8 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x203 completed-with-junk (junk recorded, never fatal) — SUCCESS:\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20the index is searchable, and the summary on stdout opens\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20with a line starting `ok:` that says so (xerj-done carries\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ok=true). Treat 0 and 3 alike as a finished run. This\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20ok=true), except stale-resume-plan below. Treat 0 and 3\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20alike as a finished run. This\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20includes a dataset whose mapping the server REFUSED: its\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20files are recorded as junk with the server's reason, the\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20xerj-done line carries datasets_refused / files_refused,\n\
@@ -795,8 +791,11 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20resume plan was frozen. They are not counted as junk.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20`skipped_appeared` is the count; the summary names the\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20first few paths and says to re-run with --fresh to\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20rebuild the plan in place and include them. Read `reason`\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20to tell this apart from completed-with-junk;\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20rebuild the plan in place and include them. For this\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20exit 3, the xerj-done line\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20carries ok=false and the summary opens with `not ok:`,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20because the files it skipped are not searchable. Read\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20`reason` to tell this apart from completed-with-junk;\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20or files-removed — a graph-path rerun deleted documents,\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20catalog rows and edges for files that left the folder.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20The index matches the folder; the next unchanged rerun is\n\
@@ -810,9 +809,9 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20that does not fit is not started, including with --yes.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Already-indexed files are not deleted unless --drop-indexed\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is also set;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 endpoint/journal failure, a refused corpus removal, a\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20refused unsafe state transition, or pdf-worker-unavailable — every PDF\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20failed because the isolated parser could not start. Other files may\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 runtime failure, including endpoint/journal failure,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20a refused removal or unsafe state transition, verification failure,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20or pdf-worker-unavailable (the isolated PDF parser could not start). Files may\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20already be indexed. Read `reason` on the xerj-done line; the summary\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20on stdout opens with `not ok:`\n",
         feedback_block = xerj_common::feedback::block(feedback),
