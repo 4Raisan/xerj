@@ -1594,6 +1594,32 @@ fn tiered_cap_mb(effective_bytes: u64) -> u64 {
     }
 }
 
+/// Startup warning when the machine has less memory free right now than
+/// the cap this node just chose (#2574). The cap is sized from total RAM (or
+/// the cgroup limit), so the friendly "detected N usable" line reads as if
+/// availability had been checked. On a box where another process already
+/// holds most of the RAM (a local LLM engine, say) the node will be swapped
+/// or OOM-killed before its own breaker trips. `None` when availability is
+/// unknown, when there is no cap, or when there is room for it.
+fn available_memory_startup_line(
+    available: Option<u64>,
+    effective: u64,
+    limit: u64,
+) -> Option<String> {
+    let available = available?;
+    if limit == 0 || available >= limit {
+        return None;
+    }
+    Some(format!(
+        "memory: only {} of {} is available right now — other processes hold the rest — \
+         which is less than the {} cap; if they keep it, lower limits.max_process_memory_mb \
+         or XERJ_MAX_PROCESS_MEMORY_MB to fit what is left",
+        format_gib(available),
+        format_gib(effective),
+        format_gib(limit),
+    ))
+}
+
 /// Human-friendly binary size for the startup line: whole GiB when exact, one
 /// decimal when not, and MiB below 1 GiB. Presentation only.
 fn format_gib(bytes: u64) -> String {
@@ -1963,6 +1989,13 @@ fn build(config: &Config) -> ResourceGovernor {
             format_gib(memory_limit_bytes),
             cap_reason,
         );
+    }
+    if let Some(line) = available_memory_startup_line(
+        xerj_common::resource::available_memory_bytes(),
+        effective_memory_bytes,
+        memory_limit_bytes,
+    ) {
+        tracing::warn!("{line}");
     }
     if startup_starved {
         tracing::warn!(
@@ -2628,6 +2661,31 @@ fn human_bytes(b: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2574: a 125 GiB box with ~40 GiB free took the 16 GiB auto tier and
+    /// said only "detected 125.4 GiB usable". Warn when the cap is above
+    /// what is free; stay quiet when there is room or nothing is known.
+    #[test]
+    fn startup_warns_when_free_memory_is_below_the_cap() {
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let line = available_memory_startup_line(Some(10 * GIB), 100 * GIB, 16 * GIB)
+            .expect("10 GiB free under a 16 GiB cap must warn");
+        assert!(
+            line.contains("only 10 GiB of 100 GiB is available"),
+            "{line}"
+        );
+        assert!(line.contains("16 GiB cap"), "{line}");
+        assert!(line.contains("limits.max_process_memory_mb"), "{line}");
+        assert_eq!(
+            available_memory_startup_line(Some(40 * GIB), 125 * GIB, 16 * GIB),
+            None
+        );
+        assert_eq!(
+            available_memory_startup_line(None, 125 * GIB, 16 * GIB),
+            None
+        );
+        assert_eq!(available_memory_startup_line(Some(GIB), 125 * GIB, 0), None);
+    }
 
     #[test]
     fn analyze_reservation_fits_under_the_watermark_and_rejects_at_it() {
