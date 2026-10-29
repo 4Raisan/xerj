@@ -21,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj autoindex` fails a run when one dataset index holds no documents
+  although the journal says records were written to it, even when the other
+  datasets are live (#2407, defect 2). The check summed live documents over
+  every dataset, so a populated `-json` index let a re-run print `ok: indexed
+  and searchable` over an empty `-docs` index. The error names each empty
+  index and the records and files the journal sent it.
 - SQL source extraction no longer slices statement heads inside a UTF-8
   character, so unrecognized CJK statement/comment heads do not panic (#2547).
 - Short Markdown files with YAML frontmatter retain their prose body even

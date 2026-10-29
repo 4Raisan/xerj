@@ -6516,6 +6516,66 @@ impl std::fmt::Display for ZeroLiveVerificationError {
 
 impl std::error::Error for ZeroLiveVerificationError {}
 
+/// A dataset index the resume journal says received records, and that answers
+/// with zero live documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmptyDataset {
+    index: String,
+    /// Records journaled by completed files that write only to empty datasets.
+    records: u64,
+    files: usize,
+}
+
+/// The per-dataset half of the #195 gate (#2407). Summing live documents over
+/// every dataset let a populated sibling hide an index that held nothing, so a
+/// re-run reported `ok: indexed and searchable` over an empty `-docs` index.
+///
+/// The journal keeps one record count per file, and a file's groups can feed
+/// several datasets, so records are attributed to a file's datasets only as a
+/// set: a completed file with records is missing when EVERY dataset it feeds
+/// answers zero. A dataset with no count (refused, or the count did not
+/// answer) is unknown, not empty, and never makes a file missing.
+fn datasets_left_empty(
+    plan: &Plan,
+    done: &HashMap<String, FileDone>,
+    ds_counts: &HashMap<String, u64>,
+) -> Vec<EmptyDataset> {
+    let mut empty: BTreeMap<String, (u64, usize)> = BTreeMap::new();
+    for (key, file) in done {
+        if file.records == 0 {
+            continue;
+        }
+        let Some(assignment) = plan.files.get(key) else {
+            continue;
+        };
+        let slugs: BTreeSet<&str> = assignment
+            .assignments
+            .iter()
+            .map(|(_, slug)| slug.as_str())
+            .collect();
+        if slugs.is_empty() || !slugs.iter().all(|slug| ds_counts.get(*slug) == Some(&0)) {
+            continue;
+        }
+        for slug in slugs {
+            let entry = empty.entry(slug.to_string()).or_default();
+            entry.0 += file.records;
+            entry.1 += 1;
+        }
+    }
+    plan.datasets
+        .iter()
+        .filter_map(|dataset| {
+            empty
+                .get(&dataset.slug)
+                .map(|(records, files)| EmptyDataset {
+                    index: dataset.index.clone(),
+                    records: *records,
+                    files: *files,
+                })
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct UnsupportedInventoryDeltaError {
     delta: UnsupportedInventoryDelta,
@@ -11797,8 +11857,9 @@ fn run_index_report_inner(
     // "the corpus has no match" from "nothing was ever written". This is
     // the last-resort catch for any rejection path the per-bulk
     // classification does not recognise.
-    let (files_done_journaled, journal_records) = {
+    let (files_done_journaled, journal_records, left_empty) = {
         let journal = journal_mx.lock().unwrap();
+        let left_empty = datasets_left_empty(&plan, &journal.done, &ds_counts);
         // #2314: a file swept because it left the folder is still in
         // `journal.done` until the next plan write forgets to republish it.
         // Those records are supposed to be gone. Counting them made a folder
@@ -11811,7 +11872,7 @@ fn run_index_report_inner(
                 journal_records += done.records;
             }
         }
-        (files_done_journaled, journal_records)
+        (files_done_journaled, journal_records, left_empty)
     };
     let live_records: u64 = ds_counts.values().sum();
     if !count_unknown.is_empty() {
@@ -11839,6 +11900,31 @@ fn run_index_report_inner(
             state_dir: state_dir.display().to_string(),
         }
         .into());
+    } else if !left_empty.is_empty() {
+        // #2407: other datasets are live, so this is not the wiped
+        // destination `ZeroLiveVerificationError` stands for, and `xerj
+        // brain` must not read it as one.
+        let named: Vec<String> = left_empty
+            .iter()
+            .map(|d| {
+                format!(
+                    "{} ({} record(s) from {} file(s))",
+                    d.index, d.records, d.files
+                )
+            })
+            .collect();
+        anyhow::bail!(
+            "autoindex verification failed: {} of the {} dataset index(es) hold 0 live \
+             documents although the resume journal records records written to them: {}. \
+             The other datasets are live, so the run is not reported as indexed. A \
+             server-side rejection of that dataset's writes (for example an embedding \
+             width its mapping does not fit) or a deleted index leaves this. Journal \
+             state dir: {}. Fix the cause, then rerun with --fresh to re-index from scratch",
+            left_empty.len(),
+            plan.datasets.len(),
+            named.join(", "),
+            state_dir.display()
+        );
     }
 
     // correlations
@@ -14614,6 +14700,99 @@ mod map_metadata_tests {
                 .collect(),
             as_document: false,
         }
+    }
+
+    fn dataset(slug: &str) -> PlanDataset {
+        PlanDataset {
+            slug: slug.into(),
+            index: format!("ax-{slug}"),
+            family: "text".into(),
+            group: None,
+            specs: vec![],
+            time_field: None,
+            semantic_field: None,
+            text_analyzer: None,
+            scope: None,
+            sampled_records: 1,
+            file_count: 1,
+        }
+    }
+
+    fn done(key: &str, records: u64) -> (String, FileDone) {
+        (
+            key.into(),
+            FileDone {
+                file_key: key.into(),
+                path: format!("{key}.dat"),
+                records,
+                junk: 0,
+                bytes: 1,
+                dropped_by_dataset: HashMap::new(),
+                generation: None,
+            },
+        )
+    }
+
+    /// #2407: a live sibling must not hide a dataset that holds nothing. The
+    /// prose file wrote only to `docs`, which answers 0 while `json` is live.
+    /// A file that also feeds a live dataset cannot be shown missing (the
+    /// journal has one count per file), and a dataset with no count is
+    /// unknown, not empty.
+    #[test]
+    fn a_dataset_left_empty_beside_a_live_sibling_is_named() {
+        let plan = Plan {
+            datasets: vec![dataset("docs"), dataset("json"), dataset("mixed")],
+            files: HashMap::from([
+                ("prose-1".into(), assignment(&["docs"])),
+                ("prose-2".into(), assignment(&["docs"])),
+                ("rows".into(), assignment(&["json"])),
+                ("both".into(), assignment(&["mixed", "json"])),
+                ("unknown".into(), assignment(&["refused"])),
+            ]),
+            ..Plan::default()
+        };
+        let journal = HashMap::from([
+            done("prose-1", 3),
+            done("prose-2", 2),
+            done("rows", 120),
+            done("both", 4),
+            done("unknown", 9),
+            // Swept from the folder: in the journal, not in the plan (#2314).
+            done("gone", 7),
+        ]);
+        let counts = HashMap::from([
+            ("docs".to_string(), 0),
+            ("json".to_string(), 120),
+            ("mixed".to_string(), 0),
+        ]);
+        assert_eq!(
+            datasets_left_empty(&plan, &journal, &counts),
+            [EmptyDataset {
+                index: "ax-docs".into(),
+                records: 5,
+                files: 2,
+            }]
+        );
+
+        // Every dataset live: nothing to name.
+        let live = HashMap::from([
+            ("docs".to_string(), 5),
+            ("json".to_string(), 120),
+            ("mixed".to_string(), 0),
+        ]);
+        assert!(datasets_left_empty(&plan, &journal, &live).is_empty());
+
+        // A file whose every dataset is empty names each of them.
+        let both_empty = HashMap::from([
+            ("docs".to_string(), 5),
+            ("json".to_string(), 0),
+            ("mixed".to_string(), 0),
+        ]);
+        let named: Vec<String> = datasets_left_empty(&plan, &journal, &both_empty)
+            .into_iter()
+            .map(|d| d.index)
+            .collect();
+        assert_eq!(named, ["ax-json", "ax-mixed"]);
     }
 
     #[test]
