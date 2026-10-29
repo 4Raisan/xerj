@@ -982,8 +982,16 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                          is omitted)."
                     },
                     "query": {
-                        "type": ["object", "string"],
-                        "description": "Plain string (definition-first code search) or ES query-DSL clause. Omit for match_all.",
+                        "type": "string",
+                        "description": "What to search for, in plain words — the definition-first code search \
+                         `xerj search` runs. REQUIRED unless you pass `query_dsl` instead."
+                    },
+                    "query_dsl": {
+                        "type": "object",
+                        "description": "An Elasticsearch query-DSL clause, used INSTEAD of `query` when the \
+                         search needs structure plain words cannot express — a `filter`, a `bool`, a `knn`, \
+                         a field-scoped `match`, an explicit `match_all`. Cannot be combined with `query`. \
+                         The engine's own order is kept."
                     },
                     "size": { "type": "integer", "description": "Max hits to return (default engine value)." },
                     "from": { "type": "integer", "description": "Offset for pagination." },
@@ -2558,30 +2566,64 @@ fn build_search_with_mapping(
     let index = search_index(args)?;
     let mut body = serde_json::Map::new();
     let mut plain_string = false;
-    match args.get("query") {
+    // #2549: `query` is a plain string and `query_dsl` is the structured
+    // variant, so neither is union-typed. A model whose function-calling
+    // serialized a string into the old `["object", "string"]` field unquoted
+    // produced invalid JSON on one transport and `{}` on another, while every
+    // scalar-schema sibling tool round-tripped. The two fields are also
+    // mutually exclusive and one of them is required, so an empty-argument
+    // call fails loudly instead of searching for nothing and returning 0 hits.
+    let dsl = match args.get("query_dsl") {
+        None | Some(Value::Null) => None,
+        Some(v @ Value::Object(_)) => Some(v),
+        Some(_) => {
+            return Err("`query_dsl` must be a JSON object, for example \
+                        {\"query_dsl\": {\"match_all\": {}}}"
+                .into())
+        }
+    };
+    let plain = match args.get("query") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(q)) if q.trim().is_empty() => None,
+        Some(Value::String(q)) => Some(q.clone()),
+        Some(_) => {
+            return Err(
+                "`query` must be plain search text; pass a structured ES query-DSL \
+                        clause as `query_dsl`, for example {\"query_dsl\": {\"match_all\": {}}}"
+                    .into(),
+            )
+        }
+    };
+    if let Some(dsl) = dsl {
+        if plain.is_some() {
+            return Err(
+                "pass either `query` (plain words) or `query_dsl` (an ES query-DSL \
+                        clause), not both"
+                    .into(),
+            );
+        }
+        body.insert("query".into(), dsl.clone());
+    } else if let Some(q) = plain {
         // A plain string gets the definition-first shape `xerj search` uses
         // (measured 38%→94% correct-file-at-rank-1 on cross-file lookups vs a
         // bare body match). Agents should never have to hand-write ES DSL for
-        // the common "find me this code" case; the DSL object path stays
-        // untouched for structured queries.
-        Some(Value::String(q)) if !q.trim().is_empty() => {
-            plain_string = true;
-            // #1961: the mapping-aware body the CLI builds (#1601/#1602),
-            // including the #1759 exact-phrase leg. A prose corpus drops the
-            // `defs`/`name` clauses instead of 400ing on them; a code corpus
-            // (or an unreadable mapping) keeps the historical shape. `10`
-            // only fills the discarded `size` member.
-            let mapped = mapping.and_then(mapped_property_names);
-            let numeric = mapping.map(numeric_property_names);
-            let built = search_query_body_for_mapping(q, 10, mapped.as_ref(), numeric.as_ref());
-            body.insert("query".into(), built["query"].clone());
-        }
-        Some(q) if !q.is_null() => {
-            body.insert("query".into(), q.clone());
-        }
-        _ => {
-            body.insert("query".into(), json!({ "match_all": {} }));
-        }
+        // the common "find me this code" case; `query_dsl` stays available for
+        // structured queries.
+        plain_string = true;
+        // #1961: the mapping-aware body the CLI builds (#1601/#1602),
+        // including the #1759 exact-phrase leg. A prose corpus drops the
+        // `defs`/`name` clauses instead of 400ing on them; a code corpus
+        // (or an unreadable mapping) keeps the historical shape. `10`
+        // only fills the discarded `size` member.
+        let mapped = mapping.and_then(mapped_property_names);
+        let numeric = mapping.map(numeric_property_names);
+        let built = search_query_body_for_mapping(&q, 10, mapped.as_ref(), numeric.as_ref());
+        body.insert("query".into(), built["query"].clone());
+    } else {
+        return Err("pass `query` (plain words, e.g. {\"query\": \"rotate keys\"}) or \
+                    `query_dsl` (an ES query-DSL clause, e.g. {\"query_dsl\": {\"match_all\": {}}}); \
+                    a search with neither returns nothing, so it is an error"
+            .into());
     }
     if let Some(n) = opt_u64(args, "size")? {
         body.insert("size".into(), json!(n));
@@ -3713,7 +3755,9 @@ mod tests {
             auth: None,
         };
         let msg = json!({
-            "params": { "name": "xerj_search", "arguments": { "index": "docs" } }
+            "params": { "name": "xerj_search", "arguments": {
+                "index": "docs", "query": "rotate keys"
+            } }
         });
         let res = call_tool(&ctx, &msg).await;
         assert_eq!(res["isError"], true, "{res}");
@@ -3743,7 +3787,9 @@ mod tests {
             auth: None,
         };
         let msg = json!({
-            "params": { "name": "xerj_search", "arguments": { "index": "docs" } }
+            "params": { "name": "xerj_search", "arguments": {
+                "index": "docs", "query": "rotate keys"
+            } }
         });
         let res = call_tool(&ctx, &msg).await;
         assert_eq!(res["isError"], true, "{res}");
@@ -3776,7 +3822,9 @@ mod tests {
             auth: None,
         };
         let msg = json!({
-            "params": { "name": "xerj_search", "arguments": { "index": "docs" } }
+            "params": { "name": "xerj_search", "arguments": {
+                "index": "docs", "query_dsl": { "match_all": {} }
+            } }
         });
         let res = call_tool(&ctx, &msg).await;
         assert_eq!(res["isError"], true, "{res}");
@@ -4154,18 +4202,64 @@ mod tests {
     }
 
     #[test]
-    fn search_defaults_to_match_all() {
-        let (method, path, body) = built(build_search(&json!({ "index": "docs" })));
+    fn search_takes_plain_words_or_a_query_dsl_clause() {
+        let (method, path, body) = built(build_search(&json!({
+            "index": "docs",
+            "query_dsl": { "match_all": {} }
+        })));
         assert_eq!(method, Method::Post);
         assert_eq!(path, "/docs/_search");
         assert_eq!(body["query"], json!({ "match_all": {} }));
+
+        let (_, _, body) = built(build_search(
+            &json!({ "index": "docs", "query": "rotate keys" }),
+        ));
+        assert!(body["query"].is_object(), "{body}");
+    }
+
+    /// #2549: `query` is a plain string and the ES DSL moved to `query_dsl`,
+    /// so neither field is union-typed. A model that serialized a string into
+    /// the old `["object", "string"]` field unquoted sent invalid JSON on one
+    /// transport and `{}` on another; a call with no query at all is now an
+    /// error naming both fields instead of a silent 0-hit `match_all`.
+    #[test]
+    fn search_names_the_missing_or_mistyped_query() {
+        let err = build_search(&json!({ "index": "docs" })).unwrap_err();
+        assert!(
+            err.contains("`query`") && err.contains("`query_dsl`"),
+            "{err}"
+        );
+
+        let err = build_search(&json!({ "index": "docs", "query": "   " })).unwrap_err();
+        assert!(err.contains("`query_dsl`"), "{err}");
+
+        let err = build_search(&json!({
+            "index": "docs",
+            "query": { "match": { "body": "rust" } }
+        }))
+        .unwrap_err();
+        assert!(
+            err.contains("`query_dsl`") && err.contains("must be plain search text"),
+            "{err}"
+        );
+
+        let err = build_search(&json!({
+            "index": "docs",
+            "query": "rust",
+            "query_dsl": { "match_all": {} }
+        }))
+        .unwrap_err();
+        assert!(err.contains("not both"), "{err}");
+
+        let err = build_search(&json!({ "index": "docs", "query_dsl": "match_all" })).unwrap_err();
+        assert!(err.contains("must be a JSON object"), "{err}");
     }
 
     #[test]
     fn search_passes_query_and_size() {
         let (_, _, body) = built(build_search(&json!({
             "index": "docs",
-            "query": { "match": { "body": "rust" } },
+            "query_dsl": { "match": { "body": "rust" } },
             "size": 5
         })));
         assert_eq!(body["query"]["match"]["body"], "rust");
@@ -4177,10 +4271,10 @@ mod tests {
     #[test]
     fn search_rejects_a_mistyped_size_and_from_by_name() {
         for (args, field) in [
-            (json!({"size": ""}), "size"),
-            (json!({"size": "10"}), "size"),
-            (json!({"from": true}), "from"),
-            (json!({"size": -1}), "size"),
+            (json!({"query": "rotate keys", "size": ""}), "size"),
+            (json!({"query": "rotate keys", "size": "10"}), "size"),
+            (json!({"query": "rotate keys", "from": true}), "from"),
+            (json!({"query": "rotate keys", "size": -1}), "size"),
         ] {
             let err = build_search(&args).unwrap_err();
             assert!(
@@ -4194,7 +4288,11 @@ mod tests {
             assert!(!err.contains("expected usize"), "{err}");
         }
         // A real integer still round-trips.
-        let (_, _, body) = built(build_search(&json!({"size": 0, "from": 2})));
+        let (_, _, body) = built(build_search(&json!({
+            "query": "rotate keys",
+            "size": 0,
+            "from": 2
+        })));
         assert_eq!(body["size"], 0);
         assert_eq!(body["from"], 2);
     }
@@ -4240,7 +4338,7 @@ mod tests {
         // xerj_search with no index got isError on its first real tool
         // call — nothing said the corpus lives under `ax-*`. The default
         // now matches what autoindex writes (and what `xerj search` uses).
-        let (_, path, _) = built(build_search(&json!({})));
+        let (_, path, _) = built(build_search(&json!({ "query": "rotate keys" })));
         let default_pattern =
             xerj_autoindex::search::resolve_prefix(xerj_autoindex::search::DEFAULT_SEARCH_PREFIX)
                 .unwrap()
@@ -4248,30 +4346,39 @@ mod tests {
         assert_eq!(path, format!("/{default_pattern}/_search"));
         assert_eq!(default_pattern, "ax-*");
         // Whitespace-only is treated as absent; explicit index still wins.
-        let (_, path, _) = built(build_search(&json!({ "index": "  " })));
+        let (_, path, _) = built(build_search(&json!({
+            "index": "  ",
+            "query": "rotate keys"
+        })));
         assert_eq!(path, "/ax-*/_search");
-        let (_, path, _) = built(build_search(&json!({ "index": "docs" })));
+        let (_, path, _) = built(build_search(&json!({
+            "index": "docs",
+            "query": "rotate keys"
+        })));
         assert_eq!(path, "/docs/_search");
     }
 
     #[test]
     fn search_prefix_selects_only_the_requested_corpus() {
-        for query in [json!("retry policy"), json!({"match_all": {}}), Value::Null] {
-            let (_, path, body) = built(build_search(&json!({
-                "prefix": "  project  ", "query": query
-            })));
+        for args in [
+            json!({"prefix": "  project  ", "query": "retry policy"}),
+            json!({"prefix": "  project  ", "query_dsl": {"match_all": {}}}),
+        ] {
+            let (_, path, body) = built(build_search(&args));
             assert_eq!(path, "/project-*/_search");
-            assert!(body.get("prefix").is_none());
+            assert!(body.get("prefix").is_none(), "{args}");
         }
         let (_, path, _) = built(build_search(&json!({
-            "index": "  ", "prefix": "project"
+            "index": "  ", "prefix": "project", "query": "retry policy"
         })));
         assert_eq!(path, "/project-*/_search");
         // The pattern is the CLI resolver's, including autoindex's rewrite
         // (`My_Proj` is stored as `my-proj-*`) and a trailing `-*` the caller
         // copied off an index name.
         for prefix in ["My_Proj", "  my-proj  ", "my-proj-*"] {
-            let (_, path, body) = built(build_search(&json!({"prefix": prefix})));
+            let (_, path, body) = built(build_search(
+                &json!({"prefix": prefix, "query": "retry policy"}),
+            ));
             let resolved = xerj_autoindex::search::resolve_prefix(prefix).unwrap();
             assert_eq!(path, format!("/{}/_search", resolved.pattern), "{prefix}");
             assert_eq!(resolved.pattern, "my-proj-*");
@@ -4302,7 +4409,9 @@ mod tests {
         let digit = build_search(&json!({"prefix": "2042"})).unwrap_err();
         assert!(digit.contains("lowercase letter"), "{digit}");
         assert!(!digit.contains("walked"), "{digit}");
-        let (_, path, _) = built(build_search(&json!({"prefix": null})));
+        let (_, path, _) = built(build_search(&json!({
+            "prefix": null, "query": "rotate keys"
+        })));
         assert_eq!(path, "/ax-*/_search");
     }
 
@@ -4702,7 +4811,7 @@ mod tests {
     #[test]
     fn a_dsl_query_leaves_question_inference_to_the_node() {
         let (_, _, body) = built(build_search(&json!({
-            "index": "d", "query": { "match": { "body": "refund window" } }, "rerank": {}
+            "index": "d", "query_dsl": { "match": { "body": "refund window" } }, "rerank": {}
         })));
         assert_eq!(
             body["rerank"],
@@ -4944,7 +5053,7 @@ mod tests {
         // that carried it would be forwarded to a node that never heard of
         // it (and might 400 as an unknown key). Builders copy only their own
         // known keys, so `max_tokens` cannot leak — pinned per builder.
-        let with_budget = json!({ "max_tokens": 200 });
+        let with_budget = json!({ "query": "q", "max_tokens": 200 });
         let (_, _, body) = built(build_search(&with_budget));
         assert!(body.get("max_tokens").is_none(), "{body}");
         let (_, _, body) = built(build_semantic(&json!({
@@ -5733,7 +5842,7 @@ mod tests {
             &ctx,
             &json!({
                 "params": { "name": "xerj_search", "arguments": {
-                    "query": { "match": { "body": "render the transcript" } }
+                    "query_dsl": { "match": { "body": "render the transcript" } }
                 } }
             }),
         ));

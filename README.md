@@ -495,7 +495,7 @@ Twenty-one tools are exposed. Eleven are thin proxies over an endpoint XERJ alre
 
 | Tool | What it does |
 |---|---|
-| `xerj_search` | ES query-DSL search over an index |
+| `xerj_search` | keyword search over an index, from plain words (`query`) or an ES query-DSL clause (`query_dsl`) |
 | `xerj_semantic_search` | recall by meaning over a `semantic_text` field, the query embedded server-side (default embedder is lexical feature-hashing, not neural, unless the node runs `--embed-mode neural`) |
 | `xerj_vector_search` | kNN over a `dense_vector` field |
 | `xerj_hybrid_search` | RRF or linear fusion of sub-queries |
@@ -510,6 +510,13 @@ the same function as the CLI: the prefix `xerj autoindex --prefix` stores, so
 pattern instead; non-empty `index` and `prefix` cannot be combined. An empty
 prefix, a prefix with no `[a-z0-9]` character, or a prefix that cannot name an
 index is an error. With neither argument, the tool searches `ax-*`.
+
+`query` is a plain string, and a structured ES query-DSL clause goes in
+`query_dsl` instead — `{"index":"docs","query_dsl":{"match_all":{}}}`. One of
+the two is required and they cannot be combined, so a call with neither is an
+error naming both rather than a silent `match_all` that returns nothing. The
+fields are separate because a union-typed `query` (`["object","string"]`) is
+what made some models emit invalid arguments for this tool alone (#2549).
 
 `xerj_def` finds local definitions with the same query, ranking and location deduplication
 as `xerj def --json`. For example, `{"symbol":"Cache","prefix":"project","kind":"struct","lang":"rust","k":5}`
