@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How do I search Kubernetes pod logs?</title>
-<meta name="description" content="Collect the pod logs to disk first, then index the folder. A captured run answered 1 phrase query across 3 pods and returned 18 hits, 6 per pod.">
+<title>Search text across Kubernetes pod logs from many pods</title>
+<meta name="description" content="Collect pod logs to disk, then index the folder once. A captured run answered 1 phrase query across 3 pod log files and returned 18 hits, 6 per pod.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/search-kubernetes-pod-logs-on-disk">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="How do I search Kubernetes pod logs?">
-<meta property="og:description" content="Collect the pod logs to disk first, then index the folder. A captured run answered 1 phrase query across 3 pods and returned 18 hits, 6 per pod.">
+<meta property="og:title" content="Search text across Kubernetes pod logs from many pods">
+<meta property="og:description" content="Collect pod logs to disk, then index the folder once. A captured run answered 1 phrase query across 3 pod log files and returned 18 hits, 6 per pod.">
 <meta property="og:url" content="https://xerj.org/answers/search-kubernetes-pod-logs-on-disk">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="How do I search Kubernetes pod logs?">
-<meta name="twitter:description" content="Collect the pod logs to disk first, then index the folder. A captured run answered 1 phrase query across 3 pods and returned 18 hits, 6 per pod.">
+<meta name="twitter:title" content="Search text across Kubernetes pod logs from many pods">
+<meta name="twitter:description" content="Collect pod logs to disk, then index the folder once. A captured run answered 1 phrase query across 3 pod log files and returned 18 hits, 6 per pod.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "How do I search Kubernetes pod logs?",
-  "description": "Collect the pod logs to disk first, then index the folder. A captured run answered 1 phrase query across 3 pods and returned 18 hits, 6 per pod.",
+  "headline": "Search text across Kubernetes pod logs from many pods",
+  "description": "Collect pod logs to disk, then index the folder once. A captured run answered 1 phrase query across 3 pod log files and returned 18 hits, 6 per pod.",
   "url": "https://xerj.org/answers/search-kubernetes-pod-logs-on-disk",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-20",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -224,9 +224,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>HOW DO I SEARCH KUBERNETES POD LOGS?</div>
   <div class="kicker"><span>ANSWERS · FILES AND FORMATS</span></div>
   <h1>How do I search Kubernetes pod logs?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-20</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-20</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>How do I grep for specific text across logs from multiple Kubernetes pods? Collect the pod logs to local disk first, then run xerj autoindex on the folder. In a captured run, one match_phrase request returned 18 hits, 6 from each of 3 pod log files. XERJ is not a collector, and the CRI format reads as prose.</p>
     <p class="key-fact"><strong>Key number:</strong> One <code class="inline">match_phrase</code> request returned 18 hits, 6 per pod, across 3 collected pod logs. <span class="mute">(as of 2026-08-21 · source: the captured run documented on this page)</span></p>
   </div>

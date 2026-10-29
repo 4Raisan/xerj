@@ -79,7 +79,7 @@
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -224,9 +224,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>REINDEXING MY FILES IS TAKING FOREVER. WHAT USUALLY CAUSES THAT?</div>
   <div class="kicker"><span>ANSWERS · OPERATIONS: REINDEX</span></div>
   <h1>Reindexing my files is taking forever. What usually causes that?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>Reindexing my files is taking forever; what usually causes it? Usually batch size and write cost, and sometimes a stalled call. Read created against a _count of the destination index to tell slow progress from none. A measured XERJ _reindex of 100,000 documents took 20,836 ms in 100 batches with 0 failures on one node.</p>
     <p class="key-fact"><strong>Key number:</strong> A single-node <code class="inline">_reindex</code> of 100,000 documents reported took 20,836 ms, 100 batches and 0 failures. <span class="mute">(as of 2026-08-23 · source: the captured run documented on this page)</span></p>
   </div>
@@ -316,6 +316,8 @@
     <li><a href="/docs/migration-from-es">Migrate from Elasticsearch</a></li>
     <li><a href="/answers/cheap-low-volume-log-search">What can I use for low-volume log search?</a></li>
     <li><a href="/answers/resume-interrupted-autoindex-run">The indexer died overnight. Do I have to start over?</a></li>
+    <li><a href="/answers/estimate-autoindex-time-before-running">How do I estimate folder-indexing time?</a></li>
+    <li><a href="/answers/autoindex-exit-codes">The indexer exited 3 (or 4). Did it fail?</a></li>
     <li><a href="/answers/why-autoindex-skipped-files">Why would a folder search miss files that I can see on disk?</a> <span class="mute">· same intent: operating autoindex</span></li>
     <li><a href="/answers/search-files-in-an-s3-bucket">How do I search files that live in an S3 bucket?</a> <span class="mute">· same intent: operating autoindex</span></li>
     <li><a href="/answers/autoindex-dataset-refused-by-server">One dataset was REFUSED by the server. Did I lose the whole index?</a> <span class="mute">· same intent: operating autoindex</span></li>

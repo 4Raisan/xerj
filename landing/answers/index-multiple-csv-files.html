@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Search a folder of CSV files with BM25, without a database</title>
-<meta name="description" content="Point xerj autoindex at the folder once. A captured run split 3 CSV files across 2 schemas into 2 indices and answered one query across both of them.">
+<title>Search multiple CSV files at once, without a database</title>
+<meta name="description" content="Point xerj autoindex at a folder of CSV files once. A captured run split 3 CSVs with 2 headers into 2 indices and answered one query across both.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/index-multiple-csv-files">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="Search a folder of CSV files with BM25, without a database">
-<meta property="og:description" content="Point xerj autoindex at the folder once. A captured run split 3 CSV files across 2 schemas into 2 indices and answered one query across both of them.">
+<meta property="og:title" content="Search multiple CSV files at once, without a database">
+<meta property="og:description" content="Point xerj autoindex at a folder of CSV files once. A captured run split 3 CSVs with 2 headers into 2 indices and answered one query across both.">
 <meta property="og:url" content="https://xerj.org/answers/index-multiple-csv-files">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="Search a folder of CSV files with BM25, without a database">
-<meta name="twitter:description" content="Point xerj autoindex at the folder once. A captured run split 3 CSV files across 2 schemas into 2 indices and answered one query across both of them.">
+<meta name="twitter:title" content="Search multiple CSV files at once, without a database">
+<meta name="twitter:description" content="Point xerj autoindex at a folder of CSV files once. A captured run split 3 CSVs with 2 headers into 2 indices and answered one query across both.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "Search a folder of CSV files with BM25, without a database",
-  "description": "Point xerj autoindex at the folder once. A captured run split 3 CSV files across 2 schemas into 2 indices and answered one query across both of them.",
+  "headline": "Search multiple CSV files at once, without a database",
+  "description": "Point xerj autoindex at a folder of CSV files once. A captured run split 3 CSVs with 2 headers into 2 indices and answered one query across both.",
   "url": "https://xerj.org/answers/index-multiple-csv-files",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -224,9 +224,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>I HAVE A DIRECTORY OF CSV EXPORTS. HOW DO I QUERY THEM WITHOUT OPENING EACH ONE IN EXCEL?</div>
   <div class="kicker"><span>ANSWERS · FILES AND FORMATS</span></div>
   <h1 class="h1-long">I have a directory of CSV exports. How do I query them without opening each one in Excel?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>I have a directory of CSV exports; how do I query them without opening each one in Excel? Give xerj autoindex the folder. In a captured run, 3 CSV files with 2 different headers became 2 indices holding 402 and 151 documents, and one query_string request across both returned 171 hits split by dataset.</p>
     <p class="key-fact"><strong>Key number:</strong> One CSV file yields at most 4,096 records per extraction window (<code class="inline">MAX_RECORDS_PER_FILE</code>) before the next window starts. <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/extract/mod.rs">engine/crates/xerj-autoindex/src/extract/mod.rs</a>)</span></p>
   </div>

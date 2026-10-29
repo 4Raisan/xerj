@@ -79,7 +79,7 @@
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-22",
-  "dateModified": "2026-10-23",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -232,9 +232,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/compare/">COMPARISONS</a><span class="sep">·</span>DO I NEED TYPESENSE FOR AN AGENT TO SEARCH MY DOCS?</div>
   <div class="kicker"><span>COMPARE · COMPARISON: SEARCH ENGINES</span></div>
   <h1>Do I need Typesense for an agent to search my docs?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-23</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-22 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-23</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>Do I need Typesense for an agent to search my docs? Not for a folder of mixed files: XERJ reads it with one command, where Typesense expects extracted JSON. Typesense wins faceted product browsing, and its own documentation names that a headline use case. No faceting head-to-head was measured.</p>
     <p class="key-fact"><strong>Key number:</strong> Typesense has 27,008 GitHub stars, is GPL-3.0, and released v30.2 on 2026-04-19. <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/typesense/typesense">github.com/typesense/typesense</a>)</span></p>
   </div>
@@ -287,7 +287,7 @@
   <h2>Licenses and who runs it</h2>
   <p>The Typesense server is GPL-3.0. XERJ is Apache-2.0. If you plan to embed either one in a product, read both license texts rather than this sentence.</p>
   <p>Typesense Cloud sells a dedicated cluster at a fixed hourly cost rather than charging per document or per search. XERJ ships self-hosted only, with no managed product at all, so a managed plan is a reason to pick Typesense.</p>
-  <p>Typesense documents conversational search and natural-language search as first-party features. Its documentation index lists no MCP server page, so treat any MCP server for Typesense as a community project until the vendor documents one. XERJ ships <code class="inline">xerj mcp</code> in the same binary, serving 22 tools.</p>
+  <p>Typesense documents conversational search and natural-language search as first-party features. Its documentation index lists no MCP server page, so treat any MCP server for Typesense as a community project until the vendor documents one. XERJ ships <code class="inline">xerj mcp</code> in the same binary, serving 23 tools.</p>
   <h2>The limits you inherit with XERJ</h2>
   <p>XERJ is single-node only. There is no data-plane replication, no failover and no multi-region mode, so one host is the whole deployment.</p>
   <p>The server retains heap for every document it indexes, which is an open tracked defect. Corpora past a few million documents can exhaust memory on one node.</p>

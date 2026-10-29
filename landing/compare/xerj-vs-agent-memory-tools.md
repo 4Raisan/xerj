@@ -38,10 +38,10 @@ curl -s -XPOST 'http://127.0.0.1:9200/_memory/project' -H 'content-type: applica
 
 ### Command 3
 
-Note: Recall it. Plain query recall is BM25 over the stored text.
+Note: Recall with words present in the stored fact. Plain query recall is BM25, not paraphrase understanding.
 
 ```sh
-curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{"query":"when do we release","k":3}'
+curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{"query":"Releases Fridays","k":3}'
 ```
 
 ## What each one is

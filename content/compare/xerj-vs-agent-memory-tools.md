@@ -41,8 +41,8 @@ commands:
     note: "Install the single XERJ binary."
   - cmd: "curl -s -XPOST 'http://127.0.0.1:9200/_memory/project' -H 'content-type: application/json' -d '{\"text\":\"Releases are cut from the main branch on Fridays.\"}'"
     note: "Store one fact exactly as the agent wrote it."
-  - cmd: "curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{\"query\":\"when do we release\",\"k\":3}'"
-    note: "Recall it. Plain query recall is BM25 over the stored text."
+  - cmd: "curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{\"query\":\"Releases Fridays\",\"k\":3}'"
+    note: "Recall with words present in the stored fact. Plain query recall is BM25, not paraphrase understanding."
 links_out:
   - "xerj-vs-vector-database"
   - "xerj-vs-khoj"

@@ -79,7 +79,7 @@
   "image": "https://xerj.org/og/answers-search-github-issues-and-prs-locally.png",
   "inLanguage": "en",
   "datePublished": "2026-10-20",
-  "dateModified": "2026-10-20",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -208,9 +208,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>SEARCH A REPO'S ISSUES AND PULL REQUESTS ON YOUR MACHINE</div>
   <div class="kicker"><span>ANSWERS · GITHUB ISSUES</span></div>
   <h1>Search a repo's issues and pull requests on your machine</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-10-20 · UPDATED · 2026-10-20</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-10-20 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-20</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>Search a repo's issues and pull requests locally. Export them to JSONL, index the folder, and query that index instead of reading <code class="inline">gh</code> JSON. On 2026-10-20 the <code class="inline">gh</code> capture file was 36,550 bytes and the <code class="inline">xerj search</code> capture file was 1,865 bytes. Two of the three passages were cited as line 1.</p>
     <p class="key-fact"><strong>Key number:</strong> The captured gh search file was 36,550 bytes and the xerj search file was 1,865 bytes. <span class="mute">(as of 2026-10-20 · source: <a href="https://github.com/xerj-org/xerj/blob/main/benchmarks/agent-queries-2026-10-20/01-byte-compare.txt">benchmarks/agent-queries-2026-10-20/01-byte-compare.txt</a>)</span></p>
   </div>
@@ -252,7 +252,7 @@
   <pre class="code"><code class="language-sh">curl -s -XPOST http://127.0.0.1:9217/gh-*/_search -H 'content-type: application/json' -d '{"size":5,"_source":["number","title","state","url"],"query":{"multi_match":{"query":"xerj feedback --open-pr commits and pushes","fields":["title","body"]}}}'
 </code></pre>
   <p><code class="inline">took</code> was 7. Issue 960 was first. <code class="inline">_savings.bytes</code> was 19,444, <code class="inline">measured</code> <code class="inline">sampled</code>. The same question through <code class="inline">gh issue list --json number,title,body,state,url</code> produced a capture file of 36,550 bytes, because each hit included <code class="inline">body</code>.</p>
-  <p><code class="inline">xerj mcp</code> against this node returned 17 tools, including <code class="inline">xerj_search</code>. The server does not start a node.</p>
+  <p><code class="inline">xerj mcp</code> against this node returned 17 tools on rc.97, including <code class="inline">xerj_search</code>. On main it serves 23, or 20 in a build with no hub key. The server does not start a node.</p>
   <h2>Measured on 2026-10-20</h2>
   <table>
     <thead><tr><th>Check</th><th>Result</th></tr></thead>

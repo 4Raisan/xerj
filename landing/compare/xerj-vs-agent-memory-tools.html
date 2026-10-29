@@ -241,9 +241,9 @@
   </div>
   <div class="prompt-card">
     <span class="prompt-label">RUN THIS XERJ COMMAND</span>
-    <code>curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{"query":"when do we release","k":3}'</code>
-    <button type="button" class="prompt-copy" data-copy="curl -s -XPOST &#x27;http://127.0.0.1:9200/_memory/project/_recall&#x27; -H &#x27;content-type: application/json&#x27; -d &#x27;{&quot;query&quot;:&quot;when do we release&quot;,&quot;k&quot;:3}&#x27;">COPY COMMAND</button>
-    <span class="hero-proof">Recall it. Plain query recall is BM25 over the stored text.</span>
+    <code>curl -s -XPOST 'http://127.0.0.1:9200/_memory/project/_recall' -H 'content-type: application/json' -d '{"query":"Releases Fridays","k":3}'</code>
+    <button type="button" class="prompt-copy" data-copy="curl -s -XPOST &#x27;http://127.0.0.1:9200/_memory/project/_recall&#x27; -H &#x27;content-type: application/json&#x27; -d &#x27;{&quot;query&quot;:&quot;Releases Fridays&quot;,&quot;k&quot;:3}&#x27;">COPY COMMAND</button>
+    <span class="hero-proof">Recall with words present in the stored fact. Plain query recall is BM25, not paraphrase understanding.</span>
   </div>
   <h2>What each one is</h2>
   <table>

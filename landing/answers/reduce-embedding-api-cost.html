@@ -15,8 +15,8 @@
 <!-- ga4:end -->
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>How do I reduce embedding API cost?</title>
-<meta name="description" content="XERJ embeds documents inside the node by default, so a captured lexical run made 0 outbound calls. Proxy mode sent exactly 2 calls for the same 100 documents.">
+<title>Reduce embedding API cost: embed inside the search engine</title>
+<meta name="description" content="XERJ embeds documents inside the node by default, so a captured run saw 0 non-loopback peers. Proxy mode sent exactly 2 requests for 100 documents.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -28,8 +28,8 @@
 <link rel="canonical" href="https://xerj.org/answers/reduce-embedding-api-cost">
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
-<meta property="og:title" content="How do I reduce embedding API cost?">
-<meta property="og:description" content="XERJ embeds documents inside the node by default, so a captured lexical run made 0 outbound calls. Proxy mode sent exactly 2 calls for the same 100 documents.">
+<meta property="og:title" content="Reduce embedding API cost: embed inside the search engine">
+<meta property="og:description" content="XERJ embeds documents inside the node by default, so a captured run saw 0 non-loopback peers. Proxy mode sent exactly 2 requests for 100 documents.">
 <meta property="og:url" content="https://xerj.org/answers/reduce-embedding-api-cost">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -37,8 +37,8 @@
 <meta property="og:image:alt" content="XERJ.ai — the search engine built for AI agents">
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="How do I reduce embedding API cost?">
-<meta name="twitter:description" content="XERJ embeds documents inside the node by default, so a captured lexical run made 0 outbound calls. Proxy mode sent exactly 2 calls for the same 100 documents.">
+<meta name="twitter:title" content="Reduce embedding API cost: embed inside the search engine">
+<meta name="twitter:description" content="XERJ embeds documents inside the node by default, so a captured run saw 0 non-loopback peers. Proxy mode sent exactly 2 requests for 100 documents.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -73,13 +73,13 @@
 {
   "@context": "https://schema.org",
   "@type": "TechArticle",
-  "headline": "How do I reduce embedding API cost?",
-  "description": "XERJ embeds documents inside the node by default, so a captured lexical run made 0 outbound calls. Proxy mode sent exactly 2 calls for the same 100 documents.",
+  "headline": "Reduce embedding API cost: embed inside the search engine",
+  "description": "XERJ embeds documents inside the node by default, so a captured run saw 0 non-loopback peers. Proxy mode sent exactly 2 requests for 100 documents.",
   "url": "https://xerj.org/answers/reduce-embedding-api-cost",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
   "datePublished": "2026-08-21",
-  "dateModified": "2026-10-19",
+  "dateModified": "2026-10-28",
   "author": {
     "@type": "Organization",
     "name": "XERJ documentation team",
@@ -216,9 +216,9 @@
   <div class="breadcrumb"><a href="/">HOME</a><span class="sep">·</span><a href="/answers/">ANSWERS</a><span class="sep">·</span>HOW DO I REDUCE EMBEDDING API COST?</div>
   <div class="kicker"><span>ANSWERS · EMBEDDINGS: COST</span></div>
   <h1>How do I reduce embedding API cost?</h1>
-  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-19</div>
+  <div class="source-note">AUTHOR · XERJ documentation team · REVIEWED BY · XERJ engineering team · PUBLISHED · 2026-08-21 · UPDATED · 2026-10-28</div>
   <div class="prompt-card answer-first" id="short-answer">
-    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-19</span>
+    <span class="prompt-label">SHORT ANSWER · UPDATED 2026-10-28</span>
     <p>My embedding bill is too high; how do I reduce embedding API cost? Embed inside the search node. XERJ embeds semantic_text fields in-process by default, so the default configuration bills nothing to an embedding API: a capture of a default node saw 0 non-loopback peers in 3.51 s. Proxy mode sent exactly 2 requests for 100 documents.</p>
     <p class="key-fact"><strong>Key number:</strong> Proxy embedding mode batched 100 documents into exactly 2 outbound requests in the captured run. <span class="mute">(as of 2026-08-23 · source: the captured run documented on this page)</span></p>
   </div>
