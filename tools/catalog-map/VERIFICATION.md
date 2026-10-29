@@ -116,3 +116,46 @@ applicable to this read-only hint change. No speed/quality claim is made.
 Not tested: Linux/Windows execution, real managed corpus availability,
 production registry configurations or fixes to ranking/identity discovery.
 The known proxy fixture failure remains unresolved; hosted CI is separate.
+
+
+## Independent maintainer review — 2026-10-29
+
+Agent-assisted review on Linux x86_64, composed with the hybrid page-size fix
+from #2572 and current main. Original contributor commits remain ancestors.
+The source-built `xerj v1.0.0-rc.100` executable has SHA-256 `6de2bc0c54174b79c9bffdb94049e70630b8b029ec547c4b8d08eccdb58e2606`.
+The release-tested engine tree is `26f5586be30c715d99bff86fece77616b3f033a4`;
+subsequent changes add the YAML cases and this receipt, not runtime Rust.
+
+- Negative catalog transport control: the previous binary failed exactly the
+  four empty/missing namespace cases; the six populated/401/403 controls passed.
+  The candidate passed all ten cases using `python3 tools/catalog-map/smoke.py
+  --binary engine/target/release/xerj`.
+- `RUST_MIN_STACK=16777216 cargo test --profile ci-test --locked -j 16
+  -p xerj-autoindex -p xerj-mcp -- --test-threads=2`: 2,064 passed, zero failed,
+  five existing ignored. No platform filters or skipped test names.
+- The new CLI parsing comparison initially exposed concurrent cwd/key discovery
+  changes. Holding the existing sandbox `ENV_LOCK` across both parses fixes
+  that test race without changing authentication behavior.
+- A separate initial default-parallel run failed the existing PDF-worker timeout
+  assertion (30.01 seconds versus its ten-second ceiling). An unchanged repeat
+  of the complete autoindex library at default parallelism passed all 1,849
+  tests, with two existing ignored. That intermittent timeout remains a known
+  test limitation; its assertion and the production timeout were not changed.
+- The API crate passed 1,009 tests, zero failed, two existing ignored. Restoring
+  the old unconditional page widening made the strengthened hybrid regression
+  fail; the fix passed size-zero, pagination and complete-union controls.
+- Strict Clippy passed for `xerj-api`, `xerj-autoindex`, and `xerj-mcp`, all
+  targets, with `-D warnings` and no added allowances. Scoped release build of
+  those crates plus `xerj-server` and `es-yaml-runner` passed.
+- Live schema generation and checking passed with 22 tools. Only the map
+  description changes relative to main; no tool schema is hand-written.
+- Fresh private-node ES-YAML: **231 files, 1,449 passed, zero failed, ten skipped**,
+  75 existing catch-lenient cases. This includes two new hybrid page-size YAML
+  cases. An earlier harness launch hit an occupied adjacent listener port;
+  reserving a free three-port range resolved that harness setup failure.
+- All 19 local site/guard commands passed: the SEO workflow's tests and generator
+  checks, factcheck self-test/fixture/error checks, landing constants, and
+  workflow timeouts.
+
+No performance improvement, Windows/macOS rerun, live corpus availability,
+production authentication setup, or hosted CI completion is claimed here.

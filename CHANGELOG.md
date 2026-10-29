@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Empty autoindex maps now explain that managed corpus slugs and autoindex
+  dataset/index names belong to separate discovery surfaces. CLI diagnostics,
+  MCP empty responses and the `xerj_map` description point to corpus discovery
+  without claiming a corpus exists. Missing catalogs remain errors; auth
+  refusals and successful dataset maps retain their behavior (#2412).
+
 - Public Agent Skills Discovery v0.2.0 index and a documentation-routing skill
   at `/.well-known/agent-skills/`. The index is generated from the published
   skill's metadata and exact-byte SHA-256, with a CI drift check.
@@ -99,12 +105,6 @@ continues in #2427 and #1122, which stay open.
   `--no-graph` run that has already committed: it refuses, as before (PR #2430).
 
 ### Added
-
-- Empty autoindex maps now explain that managed corpus slugs and autoindex
-  dataset/index names belong to separate discovery surfaces. CLI diagnostics,
-  MCP empty responses and the `xerj_map` description point to corpus discovery
-  without claiming a corpus exists. Missing catalogs remain errors; auth
-  refusals and successful dataset maps retain their behavior (#2412).
 
 - `scripts/bench/neural-bulk-ab.sh CONTROL_SHA CANDIDATE_SHA [N]` is an
   interleaved A/B harness for neural-embedding `_bulk` ingest. It builds each
