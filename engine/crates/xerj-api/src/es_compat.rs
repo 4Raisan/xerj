@@ -28394,7 +28394,7 @@ pub async fn reindex(
         }
     };
 
-    // `source.index` may be an index, alias, or data stream. For an alias ES
+    // `source.index` may be an index or alias. For an alias ES
     // searches EVERY backing index and applies each member's alias filter;
     // `get_index` resolves an alias to its first member only, so the old path
     // silently copied a fraction of the alias and ignored its filters.
