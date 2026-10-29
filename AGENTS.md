@@ -171,10 +171,10 @@ do not inherit a shell `PATH`. Add `"XERJ_AUTH": "ApiKey <key>"` when the node
 is not running `--insecure` — the key is `<data-dir>/admin.key`. `--url` and
 `--auth` flags override the two environment variables.
 
-Twenty-two tools: `xerj_search`, `xerj_semantic_search`, `xerj_vector_search`,
+Twenty-three tools: `xerj_search`, `xerj_semantic_search`, `xerj_vector_search`,
 `xerj_hybrid_search`, `xerj_memory_store`, `xerj_memory_recall`,
 `xerj_brain_overview`, `xerj_brain_ego`, `xerj_brain_link`, `xerj_brain_unlink`,
-`xerj_plan`, `xerj_map`, `xerj_code_search`, `xerj_index_budget`,
+`xerj_plan`, `xerj_map`, `xerj_status`, `xerj_code_search`, `xerj_index_budget`,
 `xerj_autoindex_remove`, `xerj_field_report`, `xerj_corpus_feedback`,
 `xerj_hub_find`, `xerj_hub_def`, `xerj_hub_ask`, `xerj_def`, `xerj_batch_search`. The first eleven are
 each a *thin proxy*: they build exactly the request the ES-compatible surface already accepts
