@@ -30,6 +30,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Reindex preflights every source alias member before creating or writing the
+  destination. Aliases cannot hide a source/destination overlap; a missing
+  source, invalid query or source flush failure leaves destination data intact.
+
 - Corpus cloning validates existing checkouts and serializes writers (#2453).
   New checkouts are staged before publication. Ambiguous existing directories
   are preserved for recovery rather than deleted or reset automatically.
@@ -272,6 +276,12 @@ continues in #2427 and #1122, which stay open.
   `queries` as shorthand for `{"query": <string>}` (#2497). A string item
   used to fail alone with "arguments must be a JSON object", so an agent
   that sent `["a", "b"]` lost a call; the advertised schema now allows it.
+- `_reindex` follows aliases on both sides: a source alias is searched across
+  every backing index and each member's alias filter is applied, and a
+  destination alias writes to its single write index (an ambiguous alias is
+  refused with `illegal_argument_exception`). Previously only the first
+  backing index was read or written and filters were ignored, so the call
+  reported success over the wrong data.
 
 - `xerj corpus add` accepts a local Windows path such as
   `F:\Projects\Foo` (#2472). The repo name was the text after the last `/`,
