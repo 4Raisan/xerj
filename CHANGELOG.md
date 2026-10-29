@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Corpus Hub manifest `paths` entries may name regular files as well as
+  directories (#2486). A file selection checks out that file without its
+  siblings; symlinks and submodules are refused.
+
 - MCP `xerj_status` reports node reachability, cluster health and visible
   indices before a search. It distinguishes a missing autoindex catalog from
   other indexed data and preserves failed or malformed probes as errors
@@ -25,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   skill's metadata and exact-byte SHA-256, with a CI drift check.
 
 ### Fixed
+
+- Corpus cloning validates existing checkouts and serializes writers (#2453).
+  New checkouts are staged before publication. Ambiguous existing directories
+  are preserved for recovery rather than deleted or reset automatically.
 
 - MCP `xerj_search` advertises plain text in `query` and structured clauses
   in `query_dsl`. Legacy object-valued `query` and omitted-query browsing
