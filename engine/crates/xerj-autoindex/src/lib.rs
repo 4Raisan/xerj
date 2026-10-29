@@ -6261,6 +6261,111 @@ fn pending_for_phase_b(
         .collect()
 }
 
+/// #2577: what this `--no-graph` run's options change against the execution
+/// identity the committed generation pinned, one phrase per difference. Empty
+/// means the run may continue the committed corpus.
+///
+/// The record-preparation options are pinned only as a digest, so a change
+/// there names the options that feed it rather than the old values. The digest
+/// carries its contract version as a prefix, which tells a different XERJ
+/// build apart from a changed option.
+fn no_graph_option_changes(
+    expected: &sync::ExecutionIdentity,
+    cfg: &IndexCfg,
+    root_identity: &str,
+) -> Result<Vec<String>> {
+    let on_off = |on: bool| if on { "on" } else { "off" };
+    let mut changes = Vec::new();
+    if expected.root_identity != root_identity {
+        changes.push(format!(
+            "the folder was {} and is now {root_identity}",
+            expected.root_identity
+        ));
+    }
+    if expected.url != cfg.url {
+        changes.push(format!("--url was {} and is now {}", expected.url, cfg.url));
+    }
+    if expected.prefix != cfg.prefix {
+        changes.push(format!(
+            "--prefix was {} and is now {}",
+            expected.prefix, cfg.prefix
+        ));
+    }
+    if expected.follow_symlinks != cfg.follow_symlinks {
+        changes.push(format!(
+            "--follow-symlinks was {} and is now {}",
+            on_off(expected.follow_symlinks),
+            on_off(cfg.follow_symlinks)
+        ));
+    }
+    let chunker_identity = prepared_records_identity(cfg)?;
+    if expected.chunker_identity != chunker_identity {
+        let contract = |identity: &str| {
+            identity
+                .rsplit_once('-')
+                .map(|(contract, _)| contract.to_owned())
+                .unwrap_or_default()
+        };
+        let (was, now) = (
+            contract(&expected.chunker_identity),
+            contract(&chunker_identity),
+        );
+        changes.push(if was == now {
+            "one or more record-preparation options differ, or this XERJ build fingerprints \
+             them differently (--sample, --no-semantic, --pdf-timeout-secs, --label or the \
+             label file's contents, --max-file-gb, --max-file-mb, --max-file-bytes); only a \
+             fingerprint of them is saved, so the earlier values cannot be shown"
+                .to_owned()
+        } else {
+            format!("the record-preparation contract was {was} and this XERJ build uses {now}")
+        });
+    }
+    if expected.graph_enabled
+        || expected.brain != "disabled"
+        || expected.detector_identity != DETECTOR_DISABLED_IDENTITY
+    {
+        changes.push(format!(
+            "relationship detection was on (graph {}, --brain {}) and this run has it off",
+            on_off(expected.graph_enabled),
+            expected.brain
+        ));
+    }
+    Ok(changes)
+}
+
+/// #2577: the plan-derived half of the pinned execution identity. Dataset
+/// definitions are frozen across generations, so on the same XERJ build these
+/// match; a difference means the build derives different mappings for them.
+fn contract_identity_changes(
+    expected: &sync::ExecutionIdentity,
+    plan: &Plan,
+) -> Result<Vec<String>> {
+    let (schema_identity, index_identity) = generation_contract_identities(plan)?;
+    let mut changes = Vec::new();
+    if expected.schema_identity != schema_identity || expected.index_identity != index_identity {
+        changes.push(
+            "this XERJ build derives different schemas, index mappings or catalog mapping \
+             for the committed datasets than the build that committed them"
+                .to_owned(),
+        );
+    }
+    Ok(changes)
+}
+
+fn refuse_execution_changes(generation: u64, changes: Vec<String>) -> Result<()> {
+    if changes.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "autoindex execution configuration changed since the committed generation \
+         {generation}: {}. Nothing was copied and no remote data was changed; generation \
+         {generation} and its state are intact. Re-run with the options (and the XERJ \
+         version) generation {generation} was built with to update it, or index the folder \
+         with a new --prefix and a new --state-dir to build it with the new options",
+        changes.join("; ")
+    )
+}
+
 /// An unchanged re-index must not fail with a false "embedding execution
 /// identity changed" message (#487). The identity changed only when a
 /// comparable field differs from what the journal pinned. `resumable` is
@@ -9407,6 +9512,16 @@ fn run_index_report_inner(
             .as_ref()
             .context("generated journal lost its committed manifest")?
             .clone();
+        // #2577: refuse a changed option before reconciling or sealing
+        // anything. Both arms below require these fields to match; the
+        // changed arm used to find out only after copying the corpus, as a
+        // false "state not internally consistent" error.
+        if let Some(expected) = &base.execution {
+            refuse_execution_changes(
+                base.generation,
+                no_graph_option_changes(expected, &cfg, &root_str)?,
+            )?;
+        }
         let mut plan = project_reconcile_plan(
             &inventory,
             &base.plan,
@@ -9417,6 +9532,23 @@ fn run_index_report_inner(
             tally,
         )?;
         record_unreadable_skips(&mut plan, &inventory.unreadable);
+        if let Some(expected) = &base.execution {
+            refuse_execution_changes(base.generation, contract_identity_changes(expected, &plan)?)?;
+            if plan
+                .datasets
+                .iter()
+                .any(|dataset| dataset.semantic_field.is_some())
+            {
+                let current = es.embedding_execution_identity()?;
+                ensure_embedding_execution_unchanged_and_resumable(
+                    &current,
+                    &expected.embedding_identity_sha256,
+                    &expected.embedding_backend,
+                    expected.embedding_dimension,
+                    &expected.embedding_semantic_contract,
+                )?;
+            }
+        }
         // Say out loud that the decision gate is not on this route. It is an
         // incremental reconcile of an already-committed generation, so the work
         // is the *changed* set and is published from a sealed snapshot rather
@@ -9434,37 +9566,6 @@ fn run_index_report_inner(
             ));
         }
         if serde_json::to_value(&plan)? == serde_json::to_value(&base.plan)? {
-            if let Some(expected) = &base.execution {
-                let (schema_identity, index_identity) = generation_contract_identities(&plan)?;
-                anyhow::ensure!(
-                    expected.root_identity == root_str
-                        && expected.url == cfg.url
-                        && expected.prefix == cfg.prefix
-                        && expected.follow_symlinks == cfg.follow_symlinks
-                        && expected.chunker_identity == prepared_records_identity(&cfg)?
-                        && !expected.graph_enabled
-                        && expected.brain == "disabled"
-                        && expected.detector_identity == DETECTOR_DISABLED_IDENTITY
-                        && expected.schema_identity == schema_identity
-                        && expected.index_identity == index_identity,
-                    "autoindex execution configuration changed since the committed generation; \
-                     rebuild with a new --state-dir and a new --prefix"
-                );
-                if plan
-                    .datasets
-                    .iter()
-                    .any(|dataset| dataset.semantic_field.is_some())
-                {
-                    let current = es.embedding_execution_identity()?;
-                    ensure_embedding_execution_unchanged_and_resumable(
-                        &current,
-                        &expected.embedding_identity_sha256,
-                        &expected.embedding_backend,
-                        expected.embedding_dimension,
-                        &expected.embedding_semantic_contract,
-                    )?;
-                }
-            }
             let summary = finish_generated_run(&es, &mut journal, &cfg)?;
             let code = generated_exit_code(&summary);
             finish_generated_progress(&pr, code, &summary, dataless_skipped);

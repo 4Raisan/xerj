@@ -153,6 +153,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `start_line` are unchanged. An unchanged file is not re-extracted, so re-index
   with `xerj autoindex --fresh` to retitle documents already in an index.
 
+- A `--no-graph` re-index whose options differ from the committed generation
+  (for example `--sample` or `--follow-symlinks`) is refused before anything
+  is copied, and the error names the option. It used to copy and prepare the
+  whole folder, then report "could not derive generation N; the durable
+  generation state is not internally consistent", although the state was
+  intact and the original options still updated the corpus (#2577).
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This

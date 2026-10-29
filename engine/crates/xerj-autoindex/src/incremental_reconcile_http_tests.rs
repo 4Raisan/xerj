@@ -7392,3 +7392,68 @@ fn a_file_that_changes_size_during_snapshot_seal_is_skipped() {
         "the rerun indexes the bytes the file settled on"
     );
 }
+
+/// #2577: a `--no-graph` run whose options differ from the committed
+/// generation is refused before anything is copied, and the refusal names the
+/// option. It used to seal the whole corpus and then report the durable state
+/// as "not internally consistent", which it was not: the original options
+/// still continue the corpus.
+#[test]
+fn changed_option_is_refused_before_sealing_and_named() {
+    let _guard = HTTP_E2E_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let _replay_guard = sync_executor::REPLAY_FAILPOINT_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let corpus = tempfile::tempdir().unwrap();
+    let state_dir = tempfile::tempdir().unwrap();
+    fs::write(corpus.path().join("a.csv"), "id,value\n1,alpha\n").unwrap();
+    let endpoint = HttpEndpoint::start();
+    let config = cfg(corpus.path(), state_dir.path(), &endpoint.url, false);
+    assert_eq!(run_index(config.clone()).unwrap(), 0);
+
+    let mut sample = config.clone();
+    sample.sample += 1;
+    let mut symlinks = config.clone();
+    symlinks.follow_symlinks = true;
+    let cases = [
+        (sample, "build fingerprints them differently (--sample"),
+        (symlinks, "--follow-symlinks was off and is now on"),
+    ];
+    for (round, (changed, named)) in cases.into_iter().enumerate() {
+        // Both reconcile arms: an unchanged folder and an edited one.
+        for edit in [false, true] {
+            if edit {
+                fs::write(
+                    corpus.path().join("a.csv"),
+                    format!("id,value\n1,alpha\n2,edit{round}\n"),
+                )
+                .unwrap();
+            }
+            let snapshots = snapshot_names(state_dir.path());
+            let bulks = endpoint.data_bulk_requests();
+            let begins = journal_events(state_dir.path(), "sync_begin");
+            let error = format!("{:#}", run_index(changed.clone()).unwrap_err());
+            let context = format!("edit={edit}: {error}");
+            assert!(
+                error.contains("execution configuration changed since the committed generation"),
+                "{context}"
+            );
+            assert!(error.contains(named), "{context}");
+            assert!(error.contains("Nothing was copied"), "{context}");
+            assert!(!error.contains("not internally consistent"), "{context}");
+            assert_eq!(snapshot_names(state_dir.path()), snapshots, "{context}");
+            assert_eq!(endpoint.data_bulk_requests(), bulks, "{context}");
+            assert_eq!(
+                journal_events(state_dir.path(), "sync_begin"),
+                begins,
+                "{context}"
+            );
+        }
+        // The committed state was never damaged: the original options
+        // continue it and publish the edit.
+        let commits = journal_events(state_dir.path(), "sync_commit");
+        assert_eq!(run_index(config.clone()).unwrap(), 0);
+        assert_eq!(journal_events(state_dir.path(), "sync_commit"), commits + 1);
+    }
+    assert_eq!(endpoint.data_docs().len(), 2);
+}
