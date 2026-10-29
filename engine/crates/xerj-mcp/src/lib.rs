@@ -9,10 +9,10 @@
 //!
 //! It speaks the MCP **stdio transport**: newline-delimited
 //! JSON-RPC 2.0 messages on stdin/stdout. It exposes XERJ to any MCP-capable
-//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twenty-two
-//! tools: nineteen without a hub key, and three Corpus Hub tools
+//! agent host (Claude Desktop, IDE agents, custom orchestrators) as twenty-three
+//! tools: twenty without a hub key, and three Corpus Hub tools
 //! (`xerj_hub_*`) that run the `xerj ask` flow itself. Thirteen of those
-//! nineteen construct exactly the request the running engine already accepts
+//! twenty construct exactly the request the running engine already accepts
 //! and forward it to a configurable base URL. `xerj_index_budget` counts a
 //! folder and returns the budget plans; it does not index. `xerj_autoindex_remove`
 //! deletes one autoindexed folder after listing what that folder owns, and only
@@ -106,6 +106,7 @@ mod batch_cli;
 mod def;
 mod hub;
 mod map;
+mod status;
 mod token_budget;
 
 pub use batch_cli::run_batch_cli;
@@ -1418,6 +1419,24 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
             }
         },
         {
+            "name": "xerj_status",
+            "description": concat!(
+                "Is this node up, and what is on it? Answers the \"is it running\" ",
+                "question in one call, without a search and without reading the ",
+                "autoindex catalog: up to three GETs with bounded response bodies. Reports the ",
+                "Elasticsearch-compatible version the node claims, cluster health, ",
+                "visible index count and up to 20 names, and whether `autoindex-catalog` ",
+                "appears in that list. A missing catalog does not mean other indices are empty. ",
+                "Call this before concluding that a 404 from xerj_map or ",
+                "xerj_search means the node is down. Failed, refused, malformed or oversized ",
+                "probes remain errors with unknown fields, rather than successful empty results."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            }
+        },
+        {
             "name": "xerj_code_search",
             "description": concat!(
                 "Reference-coding retrieval over a corpus of peer projects: how did ",
@@ -2104,6 +2123,9 @@ async fn call_tool(ctx: &Ctx, msg: &Value) -> Value {
         "xerj_map" => return map::run(ctx, &args).await,
         "xerj_index_budget" => return run_index_budget(ctx, &args).await,
         "xerj_autoindex_remove" => return run_autoindex_remove(ctx, &args).await,
+        // #2515: liveness + what-is-indexed, so an empty node's 404 is not
+        // mistaken for a node that is not there.
+        "xerj_status" => return status::run(ctx, &args).await,
         "xerj_code_search" => return run_code_search(ctx, &args).await,
         // Corpus Hub v2 (plan §7): the `xerj ask` flow itself, not a proxy.
         hub_tool if hub_tool.starts_with("xerj_hub_") => {
@@ -5973,7 +5995,7 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names.len(), 22);
+        assert_eq!(names.len(), 23);
         for n in [
             "xerj_def",
             "xerj_search",
@@ -5990,6 +6012,8 @@ mod tests {
             "xerj_map",
             "xerj_index_budget",
             "xerj_autoindex_remove",
+            // #2515: liveness and what-is-indexed, before any search tool.
+            "xerj_status",
             // #977: reference-coding retrieval, served by the same pipeline
             // as `xerj code`.
             "xerj_code_search",
@@ -6119,23 +6143,23 @@ mod tests {
                 .collect()
         };
         let without = names(false);
-        assert_eq!(without.len(), 19, "{without:?}");
+        assert_eq!(without.len(), 20, "{without:?}");
         assert!(
             without.iter().all(|n| !n.starts_with("xerj_hub_")),
             "{without:?}"
         );
         let with = names(true);
-        assert_eq!(with.len(), 22, "{with:?}");
+        assert_eq!(with.len(), 23, "{with:?}");
         for n in ["xerj_hub_find", "xerj_hub_def", "xerj_hub_ask"] {
             assert!(with.iter().any(|name| name == n), "missing {n}");
         }
 
         let help = tools_paragraph(false);
-        assert!(help.contains("proxies 19 tools"), "{help}");
+        assert!(help.contains("proxies 20 tools"), "{help}");
         assert!(!help.contains("xerj_hub_"), "{help}");
         assert!(help.contains("~/xerj-data"), "{help}");
         let help = tools_paragraph(true);
-        assert!(help.contains("proxies 22 tools"), "{help}");
+        assert!(help.contains("proxies 23 tools"), "{help}");
         assert!(help.contains("xerj_hub_ask"), "{help}");
         assert!(help.contains("serves 3 Corpus Hub tools"), "{help}");
     }

@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- MCP `xerj_status` reports node reachability, cluster health and visible
+  indices before a search. It distinguishes a missing autoindex catalog from
+  other indexed data and preserves failed or malformed probes as errors
+  rather than reporting a successful empty node (#2515).
+
 - Empty autoindex maps now explain that managed corpus slugs and autoindex
   dataset/index names belong to separate discovery surfaces. CLI diagnostics,
   MCP empty responses and the `xerj_map` description point to corpus discovery
