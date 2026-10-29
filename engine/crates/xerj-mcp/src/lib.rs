@@ -93,13 +93,17 @@
 //! Diagnostics go to **stderr**; stdout is reserved exclusively for the
 //! JSON-RPC stream.
 //!
-//! ## Token budgets (#1058)
+//! ## Token budgets (#1058, default since #2491)
 //!
 //! The six search tools accept `max_tokens` and are held to it: the response
 //! text NEVER exceeds the budget. Enforcement lives in [`token_budget`],
 //! counted with one named tokenizer (XERJ's `StandardTokenizer`, UAX #29
 //! words), with duplicate passages removed before budgeting and
-//! over-budget hits reduced to locators.
+//! over-budget hits reduced to locators. Omitting `max_tokens` applies
+//! [`token_budget::DEFAULT_MAX_TOKENS`] rather than leaving the response
+//! unbounded. The batch tool and `xerj batch-search` use the same default
+//! over their whole successful JSON response. This word count is neither a
+//! byte cap nor a model/BPE token count and cannot guarantee a host output limit.
 
 mod batch;
 mod batch_cli;
@@ -878,6 +882,7 @@ fn max_tokens_arg_schema() -> Value {
     json!({
         "type": "integer",
         "minimum": token_budget::MIN_MAX_TOKENS,
+        "default": token_budget::DEFAULT_MAX_TOKENS,
         "description": format!(
             "Token budget for this response: the returned text NEVER exceeds it. Tokens are \
              counted with {} — the same word split the engine's own analyzer uses for BM25. \
@@ -889,9 +894,12 @@ fn max_tokens_arg_schema() -> Value {
              listed as LOCATORS ONLY (file:line, index/id) rather than dropped, and the \
              response's `_token_budget` block accounts for every hit: kept, locator-only, \
              deduped, dropped. Errors are never truncated — a refusal you cannot read \
-             end-to-end is worse than a long response. Minimum {}.",
+             end-to-end is worse than a long response. Minimum {}; when omitted the budget is \
+             {} UAX #29 words. This is not a byte cap or a guarantee against host output \
+             limits. Pass a larger integer to request more.",
             token_budget::TOKENIZER_NAME,
             token_budget::MIN_MAX_TOKENS,
+            token_budget::DEFAULT_MAX_TOKENS,
         )
     })
 }

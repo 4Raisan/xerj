@@ -23,6 +23,8 @@ import zipfile
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 INDEX = 'advisories'
+# Hold evidence policy fixed across all four arms, independent of adapter defaults.
+MAX_TOKENS = 1_000_000
 PACK_SHA256 = '54f0419e6d944635eeaf9199923064278c36fd578213db60ca77cc85d2a69e3d'
 PACK_TAG = 'pack-rust-vulns-2026-10-24'
 
@@ -84,6 +86,8 @@ def validate_cases(cases, records):
 
 
 def ordered_rows(response, items):
+    if '_token_budget' in response:
+        raise ValueError('benchmark requires full evidence; response budget bound')
     rows = response.get('results')
     if not isinstance(rows, list) or len(rows) != len(items):
         raise ValueError('response count mismatch')
@@ -309,7 +313,7 @@ def trial(call, cases, batch, encoding):
     calls, rows = [], []
     # No scoring, hashing or tokenization inside the timed task loop.
     start = time.perf_counter_ns()
-    captures = [call({'index': INDEX, 'size': 3, 'queries': [c['input'] for c in group]})
+    captures = [call({'index': INDEX, 'size': 3, 'max_tokens': MAX_TOKENS, 'queries': [c['input'] for c in group]})
                 for group in groups]
     elapsed = (time.perf_counter_ns() - start) / 1e6
     for group, (sent, received, response, call_ms) in zip(groups, captures):
@@ -385,7 +389,10 @@ def main():
                            'indexing': 'full pack; explicit keyword id/aliases, text title/body; dynamic=false',
                            'node': 'fresh private loopback node; lexical default; no model or reranker',
                            'cli': 'process startup included per call',
-                           'mcp': 'one persistent session; initialize excluded', 'size': 3}, 'arms': {}}
+                           'mcp': 'one persistent session; initialize excluded', 'size': 3,
+                           'version': 2, 'max_tokens': MAX_TOKENS,
+                           'budget_tokenizer': 'standard-uax29-words',
+                           'budget_policy': 'fail if response budgeting binds; require full evidence'}, 'arms': {}}
     with tempfile.TemporaryDirectory(prefix='xerj-batch-retrieval-') as temp:
         work = Path(temp)
         try:

@@ -104,7 +104,12 @@ For each transport the two arms are:
 These are tool-call counts, not observed HTTP request counts: the intentionally
 invalid item is rejected locally and mapping reads are part of the adapter.
 
-Both request `size: 3`, no `max_tokens`. All requests run at concurrency one.
+Protocol version 2 requests `size: 3` and `max_tokens: 1000000` in every arm.
+This explicit UAX #29 word allowance keeps retrieval evidence independent of
+adapter defaults; a response carrying `_token_budget` fails the run. All
+requests run at concurrency one. The earlier committed macOS/Linux receipts
+used no explicit budget and predate the adapter's default. Their raw evidence
+is retained unchanged; request payloads and token counts differ from version 2.
 One full warmup per arm is discarded. Five measured repeats alternate arm
 order. CLI runs before MCP on the same refreshed, unchanged index. Caches stay
 warm; no cache-flush, cold-query or read-under-write claim is made.
