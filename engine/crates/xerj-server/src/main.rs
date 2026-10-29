@@ -4386,6 +4386,18 @@ async fn async_main() -> Result<()> {
         warn!("{}", startup_data_dir::NEW_DIRECTORY_HINT);
     }
     open_crash_log(Path::new(&cfg.server.data_dir));
+    // Record which data dir serves this port, with or without auth, so a
+    // client that later finds the port dead can read this dir's node.lock
+    // and say whether the node exited or is still starting (#2455).
+    if let Err(error) = xerj_common::nodedir::publish_data_dir_for_port(
+        cfg.server.es_compat_port,
+        Path::new(&cfg.server.data_dir),
+    ) {
+        warn!(
+            "could not publish the data-dir path for port {}: {error}",
+            cfg.server.es_compat_port
+        );
+    }
 
     // 5. Admin key (first-run)
     ensure_admin_key(&mut cfg)?;
