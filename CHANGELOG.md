@@ -100,6 +100,12 @@ continues in #2427 and #1122, which stay open.
 
 ### Added
 
+- Empty autoindex maps now explain that managed corpus slugs and autoindex
+  dataset/index names belong to separate discovery surfaces. CLI diagnostics,
+  MCP empty responses and the `xerj_map` description point to corpus discovery
+  without claiming a corpus exists. Missing catalogs remain errors; auth
+  refusals and successful dataset maps retain their behavior (#2412).
+
 - `scripts/bench/neural-bulk-ab.sh CONTROL_SHA CANDIDATE_SHA [N]` is an
   interleaved A/B harness for neural-embedding `_bulk` ingest. It builds each
   SHA in a worktree, runs the real `xerj autoindex` client against a frozen
