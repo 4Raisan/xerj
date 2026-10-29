@@ -55664,6 +55664,7 @@ fn collect_fts_query_fields(q: &FtsQuery, out: &mut Vec<String>) {
         // queried field" gate to check.
         FtsQuery::DocScores(_) => {}
         FtsQuery::MatchAll => {}
+        FtsQuery::ConstantScore(c) => collect_fts_query_fields(&c.query, out),
     }
 }
 
@@ -55725,6 +55726,9 @@ fn collect_fts_query_terms(q: &FtsQuery, out: &mut Vec<(String, String)>) {
                 collect_fts_query_terms(sub, out);
             }
         }
+        // Non-scoring like `filter`, but still executed: collected for the
+        // same reason.
+        FtsQuery::ConstantScore(c) => collect_fts_query_terms(&c.query, out),
     }
 }
 
@@ -56039,18 +56043,27 @@ fn query_node_to_fts_projected(
         }
         QueryNode::MatchNone => None,
         // `constant_score`: MATCHING is the inner query's (so text filters
-        // keep the inverted-index path); the wrapper's constant score is
-        // applied post-hoc by the top-level override in `search` (the
-        // keyword-schema shape is served bit-exactly by `scored_columnar`
-        // before this projection is ever consulted).
-        QueryNode::Constant { query, .. } => query_node_to_fts_projected(
+        // keep the inverted-index path), and every match scores exactly the
+        // wrapper's boost. #2654: this used to return the inner projection
+        // bare and rely on the top-level override in `search`, which only
+        // sees a top-level `constant_score`; nested in a `bool` on flushed
+        // segments, the clause added the inner BM25 instead of the boost.
+        // (The keyword-schema shape is served bit-exactly by
+        // `scored_columnar` before this projection is ever consulted.)
+        QueryNode::Constant { query, score } => query_node_to_fts_projected(
             query,
             text_fields,
             exact_fields,
             keyword_fields,
             binding,
             pinned,
-        ),
+        )
+        .map(|inner| {
+            FtsQuery::ConstantScore(Box::new(xerj_fts::search::ConstantScoreQuery {
+                query: inner,
+                score: *score,
+            }))
+        }),
         QueryNode::Match {
             field,
             query,
