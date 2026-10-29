@@ -814,9 +814,9 @@ pub fn help_text_with(feedback: bool) -> String {
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20that does not fit is not started, including with --yes.\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20Already-indexed files are not deleted unless --drop-indexed\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20is also set;\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 endpoint/journal failure, a refused corpus removal, a\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20refused unsafe state transition, or pdf-worker-unavailable — every PDF\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20failed because the isolated parser could not start. Other files may\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x202 usage; 1 runtime failure, including endpoint/journal failure,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20a refused removal or unsafe state transition, verification failure,\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20or pdf-worker-unavailable (the isolated PDF parser could not start). Files may\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20already be indexed. Read `reason` on the xerj-done line; the summary\n\
          \x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20\x20on stdout opens with `not ok:`\n",
         feedback_block = xerj_common::feedback::block(feedback),

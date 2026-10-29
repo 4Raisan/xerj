@@ -16,7 +16,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>What do the xerj autoindex exit codes mean?</title>
-<meta name="description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on an endpoint or journal failure. Only 4 is asking you a question.">
+<meta name="description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on a runtime failure. Only 4 is asking you a question.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;700;800;900&family=Inter:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
@@ -29,7 +29,7 @@
 <meta property="og:site_name" content="XERJ.ai">
 <meta property="og:type" content="article">
 <meta property="og:title" content="What do the xerj autoindex exit codes mean?">
-<meta property="og:description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on an endpoint or journal failure. Only 4 is asking you a question.">
+<meta property="og:description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on a runtime failure. Only 4 is asking you a question.">
 <meta property="og:url" content="https://xerj.org/answers/autoindex-exit-codes">
 <meta property="og:image" content="https://xerj.org/og/xerj-card.png">
 <meta property="og:image:width" content="1200">
@@ -38,7 +38,7 @@
 <meta property="og:locale" content="en_US">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="What do the xerj autoindex exit codes mean?">
-<meta name="twitter:description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on an endpoint or journal failure. Only 4 is asking you a question.">
+<meta name="twitter:description" content="xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on a runtime failure. Only 4 is asking you a question.">
 <meta name="twitter:image" content="https://xerj.org/og/xerj-card.png">
 <script type="application/ld+json">
 {
@@ -74,7 +74,7 @@
   "@context": "https://schema.org",
   "@type": "TechArticle",
   "headline": "What do the xerj autoindex exit codes mean?",
-  "description": "xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on an endpoint or journal failure. Only 4 is asking you a question.",
+  "description": "xerj autoindex exits 0 complete, 3 completed-with-junk, 4 needs-a-decision, 2 usage and 1 on a runtime failure. Only 4 is asking you a question.",
   "url": "https://xerj.org/answers/autoindex-exit-codes",
   "image": "https://xerj.org/og/xerj-card.png",
   "inLanguage": "en",
@@ -140,7 +140,7 @@
       "name": "How do I tell a failed index from a completed one with junk files?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the xerj-done line carries datasets_refused and files_refused. 1 is an endpoint or journal failure and nothing about it is a junk report."
+        "text": "Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the xerj-done line carries datasets_refused and files_refused. 1 is a runtime failure and nothing about it is a junk report."
       }
     },
     {
@@ -148,7 +148,7 @@
       "name": "Is exit 1 the code for any error?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "No, and that shorthand is wrong. --help scopes 1 to an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. A bad command line is 2. On the --no-graph path, an exit 1 whose terminal line reads reason=server-backpressure means the node rejected every write for the whole 600 s a bulk waits; the line carries ops_applied and ops_remaining."
+        "text": "Exit 1 covers runtime errors, including verification failures, node or journal problems, and refused unsafe operations. A bad command line is 2. On the --no-graph path, an exit 1 whose terminal line reads reason=server-backpressure means the node rejected every write for the whole 600 s a bulk waits; the line carries ops_applied and ops_remaining."
       }
     },
     {
@@ -238,7 +238,7 @@
     <p>Exit 3 means the run finished with an outcome to inspect. Completed-with-junk is success; stale-resume-plan carries ok=false because new files were not indexed and needs a --fresh rebuild. Exit 0 is completion or cancellation, 4 needs approval, 2 is usage, and 1 is a real failure. Read the terminal reason and refusal counts before reporting coverage.</p>
     <p class="key-fact"><strong>Key number:</strong> The decision gate that produces exit 4 defaults to 10 minutes of estimated work (<code class="inline">DEFAULT_MAX_MINUTES</code>). <span class="mute">(as of 2026-10-19 · source: <a href="https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/gate.rs">engine/crates/xerj-autoindex/src/gate.rs</a>)</span></p>
   </div>
-  <p><strong>TL;DR</strong> — Read the terminal reason as well as the exit code. Exit 3 with <code class="inline">completed-with-junk</code> is success; <code class="inline">stale-resume-plan</code> has <code class="inline">ok=false</code> because new files were not indexed and needs a <code class="inline">--fresh</code> rebuild. <code class="inline">xerj autoindex</code> exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded <code class="inline">--max-minutes</code> and nothing was indexed. Exit 2 is a usage error, and exit 1 is an endpoint or journal failure. Only 4 is a question.</p>
+  <p><strong>TL;DR</strong> — Read the terminal reason as well as the exit code. Exit 3 with <code class="inline">completed-with-junk</code> is success; <code class="inline">stale-resume-plan</code> has <code class="inline">ok=false</code> because new files were not indexed and needs a <code class="inline">--fresh</code> rebuild. <code class="inline">xerj autoindex</code> exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded <code class="inline">--max-minutes</code> and nothing was indexed. Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.</p>
   <div class="prompt-card">
     <span class="prompt-label">PASTE THIS TO YOUR AI AGENT — IT DOES THE REST</span>
     <code>Read https://xerj.org/llms.txt, then inspect the terminal reason as well as the exit code. Exit 3 with stale-resume-plan has ok=false and needs --fresh; completed-with-junk requires reading the refusal list. Answer exit 4 with --approve, correct usage on 2, and investigate the error on 1.</code>
@@ -309,17 +309,17 @@
   <p>You answer it by re-running the same command with <code class="inline">--approve proceed</code>, <code class="inline">--approve fast</code> or <code class="inline">--approve cancel</code>. <code class="inline">fast</code> also applies <code class="inline">--no-semantic --no-graph</code>.</p>
   <p>A person at a terminal is prompted instead, but only when the question can actually be seen: stdin a terminal, stderr a terminal, and the progress surface on. A piped or agent-driven run is never prompted, and <code class="inline">--quiet</code> silences the prompt as well. Every un-prompted run behaves identically — the JSON request goes to stdout, which <code class="inline">--quiet</code> does not silence, and the process exits 4. The payload's <code class="inline">prompt_not_offered_because</code> names which of the three conditions was missing.</p>
   <p><code class="inline">xerj autoindex</code> never waits on stdin for a question it did not print.</p>
-  <h2>Exit 1 and exit 2 are narrower than "any error"</h2>
-  <p>The common shorthand is that 1 means any error. The binary is more specific, and the difference matters to a retry policy.</p>
+  <h2>Read the error before retrying exit 1 or 2</h2>
+  <p>Exit 1 covers runtime failures. Exit 2 identifies a usage error. The diagnostic tells you what needs to change.</p>
   <p><code class="inline">2 usage</code> is a bad command line. Nothing ran, and a retry of the same command will fail the same way.</p>
-  <p><code class="inline">1</code> is an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. The last two are refusals by design, not crashes: removing an indexed file is refused before any remote mutation, because its documents are already live and nothing on that path deletes them.</p>
+  <p><code class="inline">1</code> covers runtime failures, including node or journal errors, refused unsafe operations, unavailable parser workers, and missing-data verification failures. A refusal need not mean a crash. Follow its recovery message; an unchanged retry does not correct missing or incompatible state.</p>
   <p>So a 1 is not always something to retry. Read the error line first.</p>
   <h3>Two exit-1 endings that name themselves</h3>
   <p>On the <code class="inline">--no-graph</code> path, a run whose node answered its writes with HTTP 429 for the whole 600 seconds a bulk waits ends with a reason of its own instead of <code class="inline">aborted</code>:</p>
   <pre class="code"><code class="language-text">autoindex: stopped by server back-pressure while applying &lt;file&gt;: N operation(s) are journaled applied, M are not (this one first) — the same command resumes from here once the node accepts writes again
 xerj-done ok=false exit=1 reason=server-backpressure wall=… ops_applied=N ops_remaining=M
 </code></pre>
-  <p>Forced on a real node with a 64 MiB memory cap, that line read <code class="inline">xerj-done ok=false exit=1 reason=server-backpressure wall=609.1s ops_applied=0 ops_remaining=231</code>. The applied operations are journaled, so the same command resumes with the <code class="inline">M</code> that remain once the node accepts writes again. On that node, restarted on its default cap, it did. It is exit 1 and not 3 on purpose: 3 means a finished run with nothing to retry, and this generation is not finished. The <a href="/answers/autoindex-server-back-pressure-429">back-pressure page</a> covers the node side.</p>
+  <p>Forced on a real node with a 64 MiB memory cap, that line read <code class="inline">xerj-done ok=false exit=1 reason=server-backpressure wall=609.1s ops_applied=0 ops_remaining=231</code>. The applied operations are journaled, so the same command resumes with the <code class="inline">M</code> that remain once the node accepts writes again. On that node, restarted on its default cap, it did. It is exit 1 and not 3 on purpose: the completed-with-junk outcome is finished, while this generation is not finished. The <a href="/answers/autoindex-server-back-pressure-429">back-pressure page</a> covers the node side.</p>
   <p>A request the node calls too large is no longer an exit 1 at all. Until issue #955, both indexing paths sent the catalog as one <code class="inline">_bulk</code> request, one document per file, per dataset and per run. A corpus whose catalog held more than the engine's <code class="inline">limits.max_actions_per_bulk</code> (50,000 by default) applied every operation and then failed at the very end. On a 48,533-file corpus the <code class="inline">--no-graph</code> run ended 10,336 seconds in:</p>
   <pre class="code"><code class="language-text">xerj-done ok=false exit=1 reason=aborted wall=10336.0s
 error: prepared bulk contained 1 rejected items: {"type":"engine_exception","reason":"bulk request contains 102258 lines (~51129 actions); exceeds max_actions_per_bulk of 50000","status":413}
@@ -359,9 +359,9 @@ error: prepared bulk contained 1 rejected items: {"type":"engine_exception","rea
   <h3>Why did folder indexing stop and ask me to approve?</h3>
   <p>The measured phase-A estimate for the indexing phase was longer than <code class="inline">--max-minutes</code> (default 10). With no <code class="inline">--approve</code> or <code class="inline">--yes</code>, nothing is indexed, a JSON decision request goes to stdout and the process exits 4.</p>
   <h3>How do I tell a failed index from a completed one with junk files?</h3>
-  <p>Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the <code class="inline">xerj-done</code> line carries <code class="inline">datasets_refused</code> and <code class="inline">files_refused</code>. 1 is an endpoint or journal failure and nothing about it is a junk report.</p>
+  <p>Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the <code class="inline">xerj-done</code> line carries <code class="inline">datasets_refused</code> and <code class="inline">files_refused</code>. 1 is a runtime failure and nothing about it is a junk report.</p>
   <h3>Is exit 1 the code for any error?</h3>
-  <p>No, and that shorthand is wrong. <code class="inline">--help</code> scopes 1 to an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. A bad command line is 2. On the <code class="inline">--no-graph</code> path, an exit 1 whose terminal line reads <code class="inline">reason=server-backpressure</code> means the node rejected every write for the whole 600 s a bulk waits; the line carries <code class="inline">ops_applied</code> and <code class="inline">ops_remaining</code>.</p>
+  <p>Exit 1 covers runtime errors, including verification failures, node or journal problems, and refused unsafe operations. A bad command line is 2. On the <code class="inline">--no-graph</code> path, an exit 1 whose terminal line reads <code class="inline">reason=server-backpressure</code> means the node rejected every write for the whole 600 s a bulk waits; the line carries <code class="inline">ops_applied</code> and <code class="inline">ops_remaining</code>.</p>
   <h3>Does exit 0 always mean the folder was indexed?</h3>
   <p>No. Answering the decision gate with <code class="inline">--approve cancel</code> also exits 0, and that run indexes nothing on purpose. Read the terminal line or the journal before you report a corpus as searchable.</p>
   <h3>Why did my run print no terminal line at all?</h3>

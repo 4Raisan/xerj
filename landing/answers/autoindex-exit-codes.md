@@ -12,7 +12,7 @@ source: "content/answers/autoindex-exit-codes.md"
 
 **Key number:** The decision gate that produces exit 4 defaults to 10 minutes of estimated work (`DEFAULT_MAX_MINUTES`). (as of 2026-10-19; source: [engine/crates/xerj-autoindex/src/gate.rs](https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-autoindex/src/gate.rs))
 
-**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success; `stale-resume-plan` has `ok=false` because new files were not indexed and needs a `--fresh` rebuild. `xerj autoindex` exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed. Exit 2 is a usage error, and exit 1 is an endpoint or journal failure. Only 4 is a question.
+**TL;DR** — Read the terminal reason as well as the exit code. Exit 3 with `completed-with-junk` is success; `stale-resume-plan` has `ok=false` because new files were not indexed and needs a `--fresh` rebuild. `xerj autoindex` exits 0 when the run completed, and 3 when it completed and recorded junk. Exit 4 means the estimate exceeded `--max-minutes` and nothing was indexed. Exit 2 is a usage error, and exit 1 is a runtime failure. Only 4 is a question.
 
 ## Agent prompt
 
@@ -125,13 +125,13 @@ A person at a terminal is prompted instead, but only when the question can actua
 
 `xerj autoindex` never waits on stdin for a question it did not print.
 
-## Exit 1 and exit 2 are narrower than "any error"
+## Read the error before retrying exit 1 or 2
 
-The common shorthand is that 1 means any error. The binary is more specific, and the difference matters to a retry policy.
+Exit 1 covers runtime failures. Exit 2 identifies a usage error. The diagnostic tells you what needs to change.
 
 `2 usage` is a bad command line. Nothing ran, and a retry of the same command will fail the same way.
 
-`1` is an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. The last two are refusals by design, not crashes: removing an indexed file is refused before any remote mutation, because its documents are already live and nothing on that path deletes them.
+`1` covers runtime failures, including node or journal errors, refused unsafe operations, unavailable parser workers, and missing-data verification failures. A refusal need not mean a crash. Follow its recovery message; an unchanged retry does not correct missing or incompatible state.
 
 So a 1 is not always something to retry. Read the error line first.
 
@@ -144,7 +144,7 @@ autoindex: stopped by server back-pressure while applying <file>: N operation(s)
 xerj-done ok=false exit=1 reason=server-backpressure wall=… ops_applied=N ops_remaining=M
 ```
 
-Forced on a real node with a 64 MiB memory cap, that line read `xerj-done ok=false exit=1 reason=server-backpressure wall=609.1s ops_applied=0 ops_remaining=231`. The applied operations are journaled, so the same command resumes with the `M` that remain once the node accepts writes again. On that node, restarted on its default cap, it did. It is exit 1 and not 3 on purpose: 3 means a finished run with nothing to retry, and this generation is not finished. The [back-pressure page](/answers/autoindex-server-back-pressure-429) covers the node side.
+Forced on a real node with a 64 MiB memory cap, that line read `xerj-done ok=false exit=1 reason=server-backpressure wall=609.1s ops_applied=0 ops_remaining=231`. The applied operations are journaled, so the same command resumes with the `M` that remain once the node accepts writes again. On that node, restarted on its default cap, it did. It is exit 1 and not 3 on purpose: the completed-with-junk outcome is finished, while this generation is not finished. The [back-pressure page](/answers/autoindex-server-back-pressure-429) covers the node side.
 
 A request the node calls too large is no longer an exit 1 at all. Until issue #955, both indexing paths sent the catalog as one `_bulk` request, one document per file, per dataset and per run. A corpus whose catalog held more than the engine's `limits.max_actions_per_bulk` (50,000 by default) applied every operation and then failed at the very end. On a 48,533-file corpus the `--no-graph` run ended 10,336 seconds in:
 
@@ -211,11 +211,11 @@ The measured phase-A estimate for the indexing phase was longer than `--max-minu
 
 ### How do I tell a failed index from a completed one with junk files?
 
-Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the `xerj-done` line carries `datasets_refused` and `files_refused`. 1 is an endpoint or journal failure and nothing about it is a junk report.
+Read the exit code and terminal reason. A stale-resume-plan outcome is incomplete and needs --fresh; otherwise 0 and 3 are finished runs; 3 additionally refused at least one file, or a whole dataset whose mapping the server answered HTTP 400 to, in which case the `xerj-done` line carries `datasets_refused` and `files_refused`. 1 is a runtime failure and nothing about it is a junk report.
 
 ### Is exit 1 the code for any error?
 
-No, and that shorthand is wrong. `--help` scopes 1 to an endpoint or journal failure, a refused corpus removal, or a refused unsafe state transition. A bad command line is 2. On the `--no-graph` path, an exit 1 whose terminal line reads `reason=server-backpressure` means the node rejected every write for the whole 600 s a bulk waits; the line carries `ops_applied` and `ops_remaining`.
+Exit 1 covers runtime errors, including verification failures, node or journal problems, and refused unsafe operations. A bad command line is 2. On the `--no-graph` path, an exit 1 whose terminal line reads `reason=server-backpressure` means the node rejected every write for the whole 600 s a bulk waits; the line carries `ops_applied` and `ops_remaining`.
 
 ### Does exit 0 always mean the folder was indexed?
 

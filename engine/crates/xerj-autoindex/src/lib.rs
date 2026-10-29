@@ -6524,6 +6524,72 @@ impl std::fmt::Display for ZeroLiveVerificationError {
 
 impl std::error::Error for ZeroLiveVerificationError {}
 
+/// A dataset index the resume journal says received records, and that answers
+/// with zero live documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmptyDataset {
+    index: String,
+    /// Exact only when every contributing file targets this dataset alone.
+    /// A file-wide journal count cannot be copied into several dataset totals.
+    records: Option<u64>,
+    files: usize,
+}
+
+/// The per-dataset half of the #195 gate (#2407). Summing live documents over
+/// every dataset let a populated sibling hide an index that held nothing, so a
+/// re-run reported `ok: indexed and searchable` over an empty `-docs` index.
+///
+/// The journal keeps one record count per file, and a file's groups can feed
+/// several datasets, so records are attributed to a file's datasets only as a
+/// set: a completed file with records is missing when EVERY dataset it feeds
+/// answers zero. A dataset with no count (refused, or the count did not
+/// answer) is unknown, not empty, and never makes a file missing.
+fn datasets_left_empty(
+    plan: &Plan,
+    done: &HashMap<String, FileDone>,
+    ds_counts: &HashMap<String, u64>,
+    excluded_file_keys: &HashSet<String>,
+) -> Vec<EmptyDataset> {
+    let mut empty: BTreeMap<String, (Option<u64>, usize)> = BTreeMap::new();
+    for (key, file) in done {
+        if file.records == 0 || excluded_file_keys.contains(key) {
+            continue;
+        }
+        let Some(assignment) = plan.files.get(key) else {
+            continue;
+        };
+        let slugs: BTreeSet<&str> = assignment
+            .assignments
+            .iter()
+            .map(|(_, slug)| slug.as_str())
+            .collect();
+        if slugs.is_empty() || !slugs.iter().all(|slug| ds_counts.get(*slug) == Some(&0)) {
+            continue;
+        }
+        let records = (slugs.len() == 1).then_some(file.records);
+        for slug in slugs {
+            let entry = empty.entry(slug.to_string()).or_insert((Some(0), 0));
+            entry.0 = entry
+                .0
+                .zip(records)
+                .and_then(|(total, n)| total.checked_add(n));
+            entry.1 += 1;
+        }
+    }
+    plan.datasets
+        .iter()
+        .filter_map(|dataset| {
+            empty
+                .get(&dataset.slug)
+                .map(|(records, files)| EmptyDataset {
+                    index: dataset.index.clone(),
+                    records: *records,
+                    files: *files,
+                })
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 struct UnsupportedInventoryDeltaError {
     delta: UnsupportedInventoryDelta,
@@ -9405,6 +9471,9 @@ fn run_index_report_inner(
     // dropped from the resumed plan so the second gate does not see them.
     let mut swept_membership = false;
     let mut deleted_file_keys: HashSet<String> = HashSet::new();
+    // Excluded files intentionally lose their live documents but retain plan
+    // identity for future inclusion. They are not missing-write evidence.
+    let mut excluded_file_keys: HashSet<String> = HashSet::new();
     if let Some(prior_plan) = preflight.plan.as_ref() {
         let comparison_keys = if cfg.fresh {
             inventory.keys.clone()
@@ -9482,6 +9551,12 @@ fn run_index_report_inner(
                 chrono::Utc::now().timestamp_millis(),
             )
             .context("sweep newly-excluded content groups")?;
+            excluded_file_keys.extend(
+                delta
+                    .excluded_content_groups
+                    .iter()
+                    .map(|entry| entry.file_key.clone()),
+            );
         }
     }
     // #736: snapshot the PRIOR plan's anchor nodes HERE, before the journal is
@@ -9877,6 +9952,12 @@ fn run_index_report_inner(
                 chrono::Utc::now().timestamp_millis(),
             )
             .context("sweep newly-excluded content groups")?;
+            excluded_file_keys.extend(
+                delta
+                    .excluded_content_groups
+                    .iter()
+                    .map(|entry| entry.file_key.clone()),
+            );
         }
     }
 
@@ -11805,8 +11886,9 @@ fn run_index_report_inner(
     // "the corpus has no match" from "nothing was ever written". This is
     // the last-resort catch for any rejection path the per-bulk
     // classification does not recognise.
-    let (files_done_journaled, journal_records) = {
+    let (files_done_journaled, journal_records, left_empty) = {
         let journal = journal_mx.lock().unwrap();
+        let left_empty = datasets_left_empty(&plan, &journal.done, &ds_counts, &excluded_file_keys);
         // #2314: a file swept because it left the folder is still in
         // `journal.done` until the next plan write forgets to republish it.
         // Those records are supposed to be gone. Counting them made a folder
@@ -11814,18 +11896,19 @@ fn run_index_report_inner(
         let mut files_done_journaled = 0usize;
         let mut journal_records = 0u64;
         for (key, done) in &journal.done {
-            if plan.files.contains_key(key) {
+            if plan.files.contains_key(key) && !excluded_file_keys.contains(key) {
                 files_done_journaled += 1;
                 journal_records += done.records;
             }
         }
-        (files_done_journaled, journal_records)
+        (files_done_journaled, journal_records, left_empty)
     };
     let live_records: u64 = ds_counts.values().sum();
     if !count_unknown.is_empty() {
         pr.warn(&format!(
             "finalize-count: {} dataset index(es) did not answer a count, so the \
-             zero-live check was not applied. The journal records {journal_records} \
+             all-indices zero-live check was not applied. Independently confirmed \
+             empty datasets are still checked. The journal records {journal_records} \
              record(s). {}",
             count_unknown.len(),
             count_unknown.join(" | ")
@@ -11847,6 +11930,36 @@ fn run_index_report_inner(
             state_dir: state_dir.display().to_string(),
         }
         .into());
+    }
+    if !left_empty.is_empty() {
+        // A confirmed empty target still matters when another count is unknown.
+        // This is not evidence that the entire destination was wiped.
+        let named: Vec<String> = left_empty
+            .iter()
+            .map(|d| match d.records {
+                Some(records) => format!(
+                    "{} ({} record(s) from {} file(s))",
+                    d.index, records, d.files
+                ),
+                None => format!(
+                    "{} ({} contributing file(s); record count not attributable per dataset)",
+                    d.index, d.files
+                ),
+            })
+            .collect();
+        anyhow::bail!(
+            "autoindex verification failed: {} of the {} dataset index(es) hold 0 live \
+             documents although completed files have journaled records and every target \
+             of those files returned zero: {}. Counts from files shared by several \
+             datasets cannot be assigned to a particular target. Other datasets may be \
+             live or unverified; the run is not reported as indexed. Check server-side \
+             write refusals and whether the target indices were deleted. Journal \
+             state dir: {}. Fix the cause, then rerun with --fresh to re-index from scratch",
+            left_empty.len(),
+            plan.datasets.len(),
+            named.join(", "),
+            state_dir.display()
+        );
     }
 
     // correlations
@@ -14626,6 +14739,110 @@ mod map_metadata_tests {
                 .collect(),
             as_document: false,
         }
+    }
+
+    fn dataset(slug: &str) -> PlanDataset {
+        PlanDataset {
+            slug: slug.into(),
+            index: format!("ax-{slug}"),
+            family: "text".into(),
+            group: None,
+            specs: vec![],
+            time_field: None,
+            semantic_field: None,
+            text_analyzer: None,
+            scope: None,
+            sampled_records: 1,
+            file_count: 1,
+        }
+    }
+
+    fn done(key: &str, records: u64) -> (String, FileDone) {
+        (
+            key.into(),
+            FileDone {
+                file_key: key.into(),
+                path: format!("{key}.dat"),
+                records,
+                junk: 0,
+                bytes: 1,
+                dropped_by_dataset: HashMap::new(),
+                generation: None,
+            },
+        )
+    }
+
+    /// #2407: a live sibling must not hide a dataset that holds nothing. The
+    /// prose file wrote only to `docs`, which answers 0 while `json` is live.
+    /// A file that also feeds a live dataset cannot be shown missing (the
+    /// journal has one count per file), and a dataset with no count is
+    /// unknown, not empty.
+    #[test]
+    fn a_dataset_left_empty_beside_a_live_sibling_is_named() {
+        let plan = Plan {
+            datasets: vec![dataset("docs"), dataset("json"), dataset("mixed")],
+            files: HashMap::from([
+                ("prose-1".into(), assignment(&["docs"])),
+                ("prose-2".into(), assignment(&["docs"])),
+                ("rows".into(), assignment(&["json"])),
+                ("both".into(), assignment(&["mixed", "json"])),
+                ("unknown".into(), assignment(&["refused"])),
+            ]),
+            ..Plan::default()
+        };
+        let journal = HashMap::from([
+            done("prose-1", 3),
+            done("prose-2", 2),
+            done("rows", 120),
+            done("both", 4),
+            done("unknown", 9),
+            // Swept from the folder: in the journal, not in the plan (#2314).
+            done("gone", 7),
+        ]);
+        let counts = HashMap::from([
+            ("docs".to_string(), 0),
+            ("json".to_string(), 120),
+            ("mixed".to_string(), 0),
+        ]);
+        assert_eq!(
+            datasets_left_empty(&plan, &journal, &counts, &HashSet::new()),
+            [EmptyDataset {
+                index: "ax-docs".into(),
+                records: Some(5),
+                files: 2,
+            }]
+        );
+
+        let deliberately_excluded = HashSet::from(["prose-1".into(), "prose-2".into()]);
+        assert!(
+            datasets_left_empty(&plan, &journal, &counts, &deliberately_excluded).is_empty(),
+            "intentional exclusion sweeps are not missing writes"
+        );
+
+        // Every dataset live: nothing to name.
+        let live = HashMap::from([
+            ("docs".to_string(), 5),
+            ("json".to_string(), 120),
+            ("mixed".to_string(), 0),
+        ]);
+        assert!(datasets_left_empty(&plan, &journal, &live, &HashSet::new()).is_empty());
+
+        // A file whose every dataset is empty names each of them.
+        let both_empty = HashMap::from([
+            ("docs".to_string(), 5),
+            ("json".to_string(), 0),
+            ("mixed".to_string(), 0),
+        ]);
+        let ambiguous = datasets_left_empty(&plan, &journal, &both_empty, &HashSet::new());
+        assert!(
+            ambiguous.iter().all(|dataset| dataset.records.is_none()),
+            "one file's shared count must not be duplicated into each dataset: {ambiguous:?}"
+        );
+        let named: Vec<String> = datasets_left_empty(&plan, &journal, &both_empty, &HashSet::new())
+            .into_iter()
+            .map(|d| d.index)
+            .collect();
+        assert_eq!(named, ["ax-json", "ax-mixed"]);
     }
 
     #[test]
