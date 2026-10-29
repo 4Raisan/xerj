@@ -3,6 +3,24 @@
   "section": "compare",
   "articles": [
     {
+      "title": "XERJ vs Mem0, Zep, Letta and Cognee for agent memory",
+      "question": "Should I use Mem0, Zep, Letta, Cognee or XERJ for AI agent memory?",
+      "canonical_url": "https://xerj.org/compare/xerj-vs-agent-memory-tools",
+      "markdown_url": "https://xerj.org/compare/xerj-vs-agent-memory-tools.md",
+      "cluster": "Comparison: agent memory",
+      "updated": "2026-10-28",
+      "summary": "How XERJ compares with Mem0, Zep, Letta and Cognee for AI agent memory: what each one stores, what it needs to run, and when to pick each one.",
+      "intent_group": "agent memory",
+      "answer": "Should I use Mem0, Zep, Letta, Cognee or XERJ for agent memory? Pick Mem0 or Cognee to have a model extract facts and links for you, Zep or Graphiti for facts that change over time, Letta for a full stateful agent. Pick XERJ for plain local memory, searched like any other data, with no model on the write path.",
+      "queries": [
+        "mem0 vs zep vs letta",
+        "mem0 alternative open source",
+        "zep alternative self-hosted",
+        "agent memory tools comparison",
+        "self-hosted agent memory no LLM"
+      ]
+    },
+    {
       "title": "Local folder search vs a web agent search API",
       "question": "How do I let an agent search a folder on my laptop instead of crawling the web?",
       "canonical_url": "https://xerj.org/compare/xerj-vs-web-agent-search",
@@ -224,7 +242,7 @@
       "canonical_url": "https://xerj.org/compare/xerj-vs-khoj",
       "markdown_url": "https://xerj.org/compare/xerj-vs-khoj.md",
       "cluster": "Comparison: personal search",
-      "updated": "2026-10-23",
+      "updated": "2026-10-28",
       "summary": "Khoj is a whole self-hosted assistant: chat, custom agents, scheduled research and image generation. XERJ is the smaller piece, the search and memory engine.",
       "intent_group": "agent memory",
       "answer": "What's a simpler alternative to Khoj if I only need search and memory? XERJ: the search and memory engine that sits under an agent you already run. Khoj is a whole application with chat, custom agents, scheduled research, voice, image generation and clients from Obsidian to WhatsApp. No head-to-head was run.",
@@ -295,7 +313,7 @@
       "canonical_url": "https://xerj.org/compare/xerj-vs-vector-database",
       "markdown_url": "https://xerj.org/compare/xerj-vs-vector-database.md",
       "cluster": "Comparison: vector database",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "Agent memory lives in the index process XERJ already runs, so no second data service starts. On 8 judged queries hybrid linear fusion scored precision@3 0.4583.",
       "intent_group": "agent memory",
       "answer": "Should my agent call a search API or a vector store like Qdrant for memory? Call the search API you already run. XERJ serves agent memory at _memory/{namespace} from the process that serves _search. On 8 judged queries hybrid linear fusion scored precision@3 0.4583. Choose Qdrant for filtered vector search at scale.",

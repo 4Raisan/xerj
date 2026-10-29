@@ -2,13 +2,13 @@
 ---
 title: "Stop agent memory filling with duplicate notes"
 canonical: "https://xerj.org/answers/store-agent-memory-without-llm-call"
-updated: "2026-10-19"
+updated: "2026-10-28"
 source: "content/answers/store-agent-memory-without-llm-call.md"
 ---
 
 # How do I stop an agent memory store from filling with near-duplicate notes?
 
-**Short answer** (updated 2026-10-19): How do I dedup agent memory so it stops filling with duplicate notes? Send dedup: true on the store call. XERJ compares the new memory against what the namespace already holds and returns the existing id with deduplicated: true instead of writing a second document. No model or summarization runs on the write path.
+**Short answer** (updated 2026-10-28): How do I dedup agent memory so it stops filling with duplicate notes? Send dedup: true on the store call. XERJ compares the new memory against what the namespace already holds and returns the existing id with deduplicated: true instead of writing a second document. No model or summarization runs on the write path.
 
 **Key number:** The default dedup threshold is a cosine similarity of 0.95. (as of 2026-10-19; source: [engine/crates/xerj-api/src/memory_api.rs](https://github.com/xerj-org/xerj/blob/main/engine/crates/xerj-api/src/memory_api.rs))
 
@@ -170,6 +170,7 @@ No. The stored `text` is the text you sent. There is no model in the write path 
 - [What's a simple way to give an agent long-term memory on my laptop without Qdrant?](/answers/agent-memory-without-postgres-qdrant)
 - [When should I turn on neural embeddings, and when is the lexical default enough?](/answers/do-search-embeddings-help)
 - [I want local search that works offline, no cloud embeddings. What are my options?](/answers/local-embeddings-without-openai-api)
+- [XERJ vs agent memory tools: Mem0, Zep, Letta and Cognee](/compare/xerj-vs-agent-memory-tools)
+- [Agentic memory vs RAG: what is the difference?](/answers/agentic-memory-vs-rag) (same intent: agent memory)
 - [How do people store user preferences so an agent can recall them next week?](/answers/coding-agent-memory-across-sessions) (same intent: agent memory)
 - [How can agent-memory links retain evidence?](/answers/evidence-for-agent-memory-links) (same intent: agent memory)
-- [Should agent memory use a knowledge graph?](/answers/knowledge-graphs-for-agent-memory) (same intent: agent memory)

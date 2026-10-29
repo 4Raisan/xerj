@@ -2,13 +2,13 @@
 ---
 title: "XERJ vs Khoj for searching your own documents"
 canonical: "https://xerj.org/compare/xerj-vs-khoj"
-updated: "2026-10-23"
+updated: "2026-10-28"
 source: "content/compare/xerj-vs-khoj.md"
 ---
 
 # What's a simpler alternative to Khoj if I only need search and memory?
 
-**Short answer** (updated 2026-10-23): What's a simpler alternative to Khoj if I only need search and memory? XERJ: the search and memory engine that sits under an agent you already run. Khoj is a whole application with chat, custom agents, scheduled research, voice, image generation and clients from Obsidian to WhatsApp. No head-to-head was run.
+**Short answer** (updated 2026-10-28): What's a simpler alternative to Khoj if I only need search and memory? XERJ: the search and memory engine that sits under an agent you already run. Khoj is a whole application with chat, custom agents, scheduled research, voice, image generation and clients from Obsidian to WhatsApp. No head-to-head was run.
 
 **Key number:** Khoj has 37,752 GitHub stars, is AGPL-3.0, and its latest release is 2.0.0-beta.28 (2026-03-26). (as of 2026-10-19; source: [github.com/khoj-ai/khoj](https://github.com/khoj-ai/khoj))
 
@@ -176,6 +176,7 @@ Khoj is AGPL-3.0, which obliges you to publish your source if you offer a modifi
 - [Can ChatGPT search a folder on my laptop, or do I need something else?](/answers/give-chatgpt-claude-local-file-access)
 - [I have a folder of PDFs, Word docs, and markdown. How do I search all of them at once?](/answers/search-file-contents-in-a-folder)
 - [What's a simple way to give an agent long-term memory on my laptop without Qdrant?](/answers/agent-memory-without-postgres-qdrant)
+- [XERJ vs agent memory tools: Mem0, Zep, Letta and Cognee](/compare/xerj-vs-agent-memory-tools)
 - [Should my agent call a search API or stand up Qdrant for persistent memory?](/compare/xerj-vs-vector-database) (same intent: agent memory)
+- [Agentic memory vs RAG: what is the difference?](/answers/agentic-memory-vs-rag) (same intent: agent memory)
 - [How do people store user preferences so an agent can recall them next week?](/answers/coding-agent-memory-across-sessions) (same intent: agent memory)
-- [How can agent-memory links retain evidence?](/answers/evidence-for-agent-memory-links) (same intent: agent memory)

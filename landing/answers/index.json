@@ -69,6 +69,58 @@
       ]
     },
     {
+      "title": "Agentic memory vs RAG: what is the difference?",
+      "question": "What is the difference between agentic memory and RAG?",
+      "canonical_url": "https://xerj.org/answers/agentic-memory-vs-rag",
+      "markdown_url": "https://xerj.org/answers/agentic-memory-vs-rag.md",
+      "cluster": "Agent memory: concepts",
+      "updated": "2026-10-28",
+      "summary": "RAG reads from documents you prepared. Agentic memory is a store the agent writes to itself. Both come down to search, and here is when you need each one.",
+      "intent_group": "agent memory",
+      "answer": "What is the difference between agentic memory and RAG? RAG retrieves from documents someone prepared ahead of time; the agent only reads. Agentic memory is a store the agent writes to itself during work and reads back later. Both depend on good search, so XERJ serves document search and agent memory from the same local binary.",
+      "queries": [
+        "agentic memory vs RAG",
+        "agent memory vs RAG",
+        "RAG vs agentic RAG",
+        "do AI agents need memory or RAG"
+      ]
+    },
+    {
+      "title": "What is agentic memory? A plain answer",
+      "question": "What is agentic memory?",
+      "canonical_url": "https://xerj.org/answers/what-is-agentic-memory",
+      "markdown_url": "https://xerj.org/answers/what-is-agentic-memory.md",
+      "cluster": "Agent memory: concepts",
+      "updated": "2026-10-28",
+      "summary": "Agentic memory is memory an AI agent writes and reads itself through tools, so facts survive past one chat. What it is, the common types, and how to run it locally.",
+      "intent_group": "agent memory",
+      "answer": "What is agentic memory? It is memory that an AI agent manages itself: the agent decides what to save, writes it through a tool call, and searches it again in a later task or session. It differs from a chat history because it is stored outside the model and survives restarts. XERJ serves it as a search endpoint.",
+      "queries": [
+        "agentic memory",
+        "what is agentic memory",
+        "AI agent memory",
+        "agentic memory types",
+        "long-term memory for AI agents"
+      ]
+    },
+    {
+      "title": "What is an MCP memory server?",
+      "question": "What is an MCP memory server?",
+      "canonical_url": "https://xerj.org/answers/what-is-an-mcp-memory-server",
+      "markdown_url": "https://xerj.org/answers/what-is-an-mcp-memory-server.md",
+      "cluster": "Agent memory: concepts",
+      "updated": "2026-10-28",
+      "summary": "An MCP memory server gives an AI assistant tools to save and recall facts across chats over the Model Context Protocol. How it works and how XERJ serves one locally.",
+      "intent_group": "agent memory",
+      "answer": "What is an MCP memory server? It is a Model Context Protocol server that gives an AI assistant tools to save facts and recall them later, so memory survives across chats and clients. The assistant calls the tools itself. XERJ ships one inside its binary: xerj mcp exposes xerj_memory_store and xerj_memory_recall.",
+      "queries": [
+        "MCP memory server",
+        "what is an MCP memory server",
+        "mcp memory server claude code",
+        "local MCP memory server"
+      ]
+    },
+    {
       "title": "Should agent memory use a graph?",
       "question": "Ask HN: Anyone using knowledge graphs for LLM agent memory/context management?",
       "canonical_url": "https://xerj.org/answers/knowledge-graphs-for-agent-memory",
@@ -89,7 +141,7 @@
       "canonical_url": "https://xerj.org/answers/store-agent-memory-without-llm-call",
       "markdown_url": "https://xerj.org/answers/store-agent-memory-without-llm-call.md",
       "cluster": "Agent memory: model dependency",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "Send dedup true on the store call and XERJ returns the existing id instead of a second document. The write path runs no model and made no outbound call.",
       "intent_group": "agent memory",
       "answer": "How do I dedup agent memory so it stops filling with duplicate notes? Send dedup: true on the store call. XERJ compares the new memory against what the namespace already holds and returns the existing id with deduplicated: true instead of writing a second document. No model or summarization runs on the write path.",
@@ -150,7 +202,7 @@
       "canonical_url": "https://xerj.org/answers/coding-agent-memory-across-sessions",
       "markdown_url": "https://xerj.org/answers/coding-agent-memory-across-sessions.md",
       "cluster": "Agent memory: setup",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "XERJ keeps agent memory in a reserved index inside the data directory. We stored two memories, restarted the node, recalled both, then forgot one by id.",
       "intent_group": "agent memory",
       "answer": "How do people store user preferences so an agent can recall them next week? XERJ stores each memory as a document in a reserved index, .xerj-memory-{namespace}, inside the node's data directory. Our capture stored two memories, restarted the node on the same directory, recalled both by id, and one forget call removed exactly one.",
@@ -165,7 +217,7 @@
       "canonical_url": "https://xerj.org/answers/set-mcp-memory-storage-path",
       "markdown_url": "https://xerj.org/answers/set-mcp-memory-storage-path.md",
       "cluster": "Agent memory: storage",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "XERJ has no separate memory path. Agent memory lives in the node data directory as .xerj-memory-{namespace}, and the MCP server stores nothing itself.",
       "intent_group": "agent memory",
       "answer": "Why does the memory MCP ignore my custom storage path setting? XERJ has no memory-specific path. Agent memory is an ordinary index named .xerj-memory-{namespace} inside the node data directory, so --data-dir sets it, and the MCP server stores nothing itself. Our capture stored a memory, restarted on the same directory, and recalled it.",
@@ -179,7 +231,7 @@
       "canonical_url": "https://xerj.org/answers/agent-memory-without-postgres-qdrant",
       "markdown_url": "https://xerj.org/answers/agent-memory-without-postgres-qdrant.md",
       "cluster": "Agent memory: topology",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "Our capture ran agent memory on one XERJ process with three loopback sockets, no second data service, and a peak resident size of 100,928 kB.",
       "intent_group": "agent memory",
       "answer": "What do people use for persistent agent memory without Postgres or Qdrant? Use the search node you already run: XERJ stores a fact with POST /_memory/{namespace} and reads it back with _recall. Our capture ran store and recall in one process, three loopback sockets, no second data service, 100,928 kB peak resident memory.",
@@ -920,7 +972,7 @@
       "canonical_url": "https://xerj.org/answers/rag-without-vector-database",
       "markdown_url": "https://xerj.org/answers/rag-without-vector-database.md",
       "cluster": "Hybrid retrieval: architecture",
-      "updated": "2026-10-19",
+      "updated": "2026-10-28",
       "summary": "Build a RAG retrieval layer on one XERJ index. One hybrid request fuses BM25 and kNN with Reciprocal Rank Fusion, and no second service runs.",
       "intent_group": "retrieval research and eval",
       "answer": "How do I build RAG without a vector database? Keep the inverted index and the dense vectors in one XERJ index and retrieve with one hybrid request, which fuses a BM25 sub-query and a kNN sub-query with Reciprocal Rank Fusion. No second service runs. Our 20-document capture returned d08, d04 and d10.",
