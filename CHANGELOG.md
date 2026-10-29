@@ -26,6 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- MCP `xerj_search` advertises plain text in `query` and structured clauses
+  in `query_dsl`. Legacy object-valued `query` and omitted-query browsing
+  remain supported; conflicting fields fail before HTTP requests (#2549).
+- Search payloads and batch retrieval default to 8,000 UAX #29 words when
+  `max_tokens` is absent or null (#2491). This is not a byte or model-token
+  cap. Explicit larger budgets remain available; errors and mandatory
+  search staleness hints stay outside the payload budget.
 - GitHub field-report submission uses the supported explicit-repository
   `gh repo fork --clone=false` invocation and adds the fork remote itself
   (#2596). The rollback test now verifies that the report was committed

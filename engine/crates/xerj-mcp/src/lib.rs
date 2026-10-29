@@ -95,8 +95,8 @@
 //!
 //! ## Token budgets (#1058, default since #2491)
 //!
-//! The six search tools accept `max_tokens` and are held to it: the response
-//! text NEVER exceeds the budget. Enforcement lives in [`token_budget`],
+//! The six search tools accept `max_tokens` for successful search payloads.
+//! Errors and the mandatory `xerj_search` staleness hint are outside the budget. Enforcement lives in [`token_budget`],
 //! counted with one named tokenizer (XERJ's `StandardTokenizer`, UAX #29
 //! words), with duplicate passages removed before budgeting and
 //! over-budget hits reduced to locators. Omitting `max_tokens` applies
@@ -884,7 +884,8 @@ fn max_tokens_arg_schema() -> Value {
         "minimum": token_budget::MIN_MAX_TOKENS,
         "default": token_budget::DEFAULT_MAX_TOKENS,
         "description": format!(
-            "Token budget for this response: the returned text NEVER exceeds it. Tokens are \
+            "Word budget for the successful search payload. Errors and mandatory \
+             xerj_search staleness hints are outside this budget. Tokens are \
              counted with {} — the same word split the engine's own analyzer uses for BM25. \
              Honest scope: that under-counts model-context subwords (snake_case is ONE token \
              here), so treat it as a deterministic proxy, not a BPE count. The budget covers \
@@ -949,8 +950,8 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                  (capped). Cite `path:match_line`. Both are omitted when no term is \
                  located or the passage start line is unknown. `start_line` remains \
                  the passage start. \
-                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
-                 see that argument for the tokenizer and the locator-only rule). \
+                 Pass `max_tokens` to override the default word budget (see that argument \
+                 for the tokenizer, exceptions and locator-only rule). \
                  If this prefix was autoindexed from a folder on this machine and a file \
                  there is newer than the last run, or an indexed file has been removed, \
                  the response adds `_xerj.hints` code `index_stale` with the last index \
@@ -1011,8 +1012,8 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                  embedded SERVER-SIDE by XERJ's built-in lexical embedder (no external \
                  API key), then matched by vector similarity. Proxies POST /{index}/_search \
                  with {\"query\":{\"semantic\":{...}}}. \
-                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
-                 see that argument for the tokenizer and the locator-only rule).",
+                 Pass `max_tokens` to override the default word budget (see that argument \
+                 for the tokenizer, exceptions and locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1036,8 +1037,8 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                  800). Filtered kNN, non-cosine metrics, SQ8 fields, and small indexes \
                  run an exact brute-force scan. \
                  Proxies POST /{index}/_search with a top-level {\"knn\":{...}}. \
-                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
-                 see that argument for the tokenizer and the locator-only rule).",
+                 Pass `max_tokens` to override the default word budget (see that argument \
+                 for the tokenizer, exceptions and locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1069,8 +1070,8 @@ pub fn tool_specs_with(include_hub: bool) -> Value {
                  Optional `judge` re-judges the fused hits LOCALLY (zero tokens, \
                  nothing leaves the node); `judge.query` is REQUIRED for the same \
                  reason. \
-                 Pass `max_tokens` to cap the response at a token budget (never exceeded; \
-                 see that argument for the tokenizer and the locator-only rule).",
+                 Pass `max_tokens` to override the default word budget (see that argument \
+                 for the tokenizer, exceptions and locator-only rule).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3505,9 +3506,9 @@ fn search_match_query(name: &str, args: &Value) -> Option<String> {
     if name != "xerj_search" {
         return None;
     }
-    match args.get("query") {
+    match search_query(args).ok().flatten() {
         Some(Value::String(q)) if !q.trim().is_empty() => Some(q.clone()),
-        Some(v @ (Value::Object(_) | Value::Array(_))) => Some(v.to_string()),
+        Some(v @ Value::Object(_)) => Some(v.to_string()),
         _ => None,
     }
 }
@@ -4218,6 +4219,11 @@ mod tests {
         let (_, _, new) = built(build_search(
             &json!({"index":"docs","query_dsl":clause,"size":2,"from":1}),
         ));
+        assert_eq!(
+            search_match_query("xerj_search", &json!({"query":clause})),
+            search_match_query("xerj_search", &json!({"query_dsl":clause})),
+            "both DSL forms must retain passage match-line annotation"
+        );
         assert_eq!(old["query"], clause);
         assert_eq!(
             new, old,
@@ -5091,13 +5097,18 @@ mod tests {
             if search_tools.contains(&name) {
                 assert!(prop.is_object(), "{name} must advertise `max_tokens`");
                 let d = prop["description"].as_str().expect("described");
-                // One NAMED tokenizer, stated in the description, plus the
-                // never-exceed promise and the floor.
+                // Name the tokenizer, default and floor, and the existing
+                // staleness-warning exception instead of promising a total cap.
                 assert!(
                     d.contains(token_budget::TOKENIZER_NAME),
                     "{name}: the tokenizer must be named: {d}"
                 );
-                assert!(d.contains("NEVER exceeds"), "{name}: {d}");
+                assert!(d.contains("successful search payload"), "{name}: {d}");
+                assert!(
+                    d.contains("staleness hints are outside this budget"),
+                    "{name}: {d}"
+                );
+                assert_eq!(prop["default"], token_budget::DEFAULT_MAX_TOKENS);
                 assert!(d.contains("LOCATORS ONLY"), "{name}: {d}");
                 assert!(
                     d.contains(&token_budget::MIN_MAX_TOKENS.to_string()),
@@ -6244,6 +6255,14 @@ mod tests {
         assert_eq!(parsed["_xerj"]["hints"][0]["code"], "index_stale");
         assert_eq!(parsed["_xerj"]["hints"][0]["path"], "docs/page.md");
         assert!(parsed["hits"]["hits"].as_array().unwrap().is_empty());
+
+        let tight = token_budget::budget_json_response(r#"{"hits":{"hits":[]}}"#, 32);
+        assert!(token_budget::count_tokens(&tight) <= 32);
+        let warned = apply_staleness(tool_text(tight, false), Some(hint.clone()));
+        assert!(
+            token_budget::count_tokens(warned["content"][0]["text"].as_str().unwrap()) > 32,
+            "the mandatory warning deliberately remains outside the payload budget"
+        );
 
         let err = tool_text("XERJ returned HTTP 400: no", true);
         let kept = apply_staleness(err.clone(), Some(hint));

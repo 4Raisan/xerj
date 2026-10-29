@@ -521,7 +521,8 @@ browsing. Prefer an explicit `query_dsl` clause when browsing is intended.
 Search tools and `xerj batch-search` default to an 8,000 UAX #29 word budget
 when `max_tokens` is omitted or null. A larger integer requests more evidence;
 accounting explains any trimming. This is not a byte cap or a model/BPE token
-limit. Errors remain untruncated.
+limit. Errors and mandatory `xerj_search` staleness hints are outside this
+budget and remain visible.
 
 `xerj_def` finds local definitions with the same query, ranking and location deduplication
 as `xerj def --json`. For example, `{"symbol":"Cache","prefix":"project","kind":"struct","lang":"rust","k":5}`

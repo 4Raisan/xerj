@@ -16,7 +16,7 @@ def main():
     binary = str(Path(sys.argv[1]).resolve(strict=True))
     requests = []
     hits = [{"_index": "docs", "_id": str(i), "_source": {
-        "body": "search evidence " * 500, "path": f"source/{i}.txt",
+        "body": "search evidence " * 500, "path": f"source/{i}.txt", "start_line": 1,
     }} for i in range(20)]
 
     class Handler(BaseHTTPRequestHandler):
@@ -66,11 +66,17 @@ def main():
             return json.loads(result["content"][0]["text"])
 
         try:
-            clause = {"bool": {"filter": {"term": {"kind": "guide"}}}}
+            clause = {"bool": {"must": {"match": {"body": "search"}}}}
+            prior = None
             for field in ("query_dsl", "query"):
                 response = successful({"index": "docs", field: clause, "max_tokens": 100000})
                 assert requests == [("POST", "/docs/_search", {"query": clause})], requests
-                assert response["hits"]["hits"] == hits, "nonbinding budget must retain full evidence"
+                returned = response["hits"]["hits"]
+                assert [h["_source"] for h in returned] == [h["_source"] for h in hits], "nonbinding budget must retain full evidence"
+                assert returned[0]["match_line"] == 1, "structured queries must retain passage locations"
+                if prior is not None:
+                    assert returned == prior, "legacy and named DSL must return identical evidence"
+                prior = returned
             print("PASS new query_dsl and legacy object query send identical structured requests")
 
             for args, path in [({"index": "docs"}, "/docs/_search"), ({}, "/ax-*/_search")]:

@@ -1,12 +1,12 @@
 //! Token budgets for MCP search-tool responses (#1058).
 //!
-//! The five search tools (`xerj_search`, `xerj_hybrid_search`,
-//! `xerj_semantic_search`, `xerj_vector_search`, `xerj_code_search`) are thin
-//! proxies: until now they returned whatever the engine sent, so an agent
-//! that asked for 50 hits got all 50 verbatim, context cost unknown and
-//! unbounded. `max_tokens` generalises the char-level cap `xerj_code_search`
-//! already had (its `full` argument — max chars *per passage*) to a token
-//! budget over the **whole response**.
+//! Six individual search tools share this output budget: `xerj_def`,
+//! `xerj_search`, `xerj_hybrid_search`, `xerj_semantic_search`,
+//! `xerj_vector_search` and `xerj_code_search`. `max_tokens` covers their
+//! successful search payload, including keys and syntax. Errors and the
+//! mandatory `xerj_search` staleness hint remain outside that budget.
+//! The batch adapter shares the tokenizer and default but preserves every
+//! item outcome using its own whole-response budgeting algorithm.
 //!
 //! ## The one tokenizer
 //!
@@ -47,7 +47,7 @@ use serde_json::{json, Value};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// How the budget counts tokens, named in tool descriptions so an agent knows
-/// what a "token" is before spending one. Kept as a constant so the five
+/// what a "token" is before spending one. Kept as a constant so the shared
 /// descriptions cannot drift.
 pub const TOKENIZER_NAME: &str = "XERJ's StandardTokenizer (UAX #29 word boundaries)";
 
