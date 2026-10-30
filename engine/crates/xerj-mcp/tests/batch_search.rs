@@ -401,3 +401,71 @@ async fn binding_budget_counts_omitted_hits_and_keeps_the_first_citation() {
             <= limit
     );
 }
+
+/// #2694: a batch whose combined `_msearch` body passes the 32 MiB cap is
+/// retried in halves, so the small items still answer and only an item whose
+/// own response is over the cap fails, alone.
+#[tokio::test]
+async fn an_oversized_msearch_is_split_and_only_the_oversized_item_fails() {
+    let requests = Arc::new(Mutex::new(Vec::<usize>::new()));
+    let seen = requests.clone();
+    let app = Router::new().route(
+        "/_msearch",
+        axum::routing::post(move |text: String| {
+            let lines: Vec<&str> = text.lines().collect();
+            seen.lock().unwrap().push(lines.len() / 2);
+            let responses: Vec<Value> = lines
+                .chunks(2)
+                .map(|pair| {
+                    // 20 MiB fits alone and two do not; 40 MiB never fits.
+                    let mib = if pair[1].contains("huge") {
+                        40
+                    } else if pair[1].contains("big") {
+                        20
+                    } else {
+                        0
+                    };
+                    json!({"hits":{"total":{"value":1,"relation":"eq"},"hits":[{
+                        "_index":"docs","_id":format!("r{}", pair[1].len()),
+                        "_source":{"ax_path":"src/a.rs","body":"x".repeat(mib << 20)}}]}})
+                })
+                .collect();
+            async move { Json(json!({ "responses": responses })) }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let result = body(
+        &call(
+            &url,
+            json!({"index":"docs","queries":[
+                {"query":{"match":{"body":"small one"}}},
+                {"query":{"match":{"body":"big one"}}},
+                {"query":{"match":{"body":"big two"}}},
+                {"query":{"match":{"body":"huge"}}},
+                {"query":{"match":{"body":"small two"}}}
+            ]}),
+        )
+        .await,
+    );
+    assert!(result.get("batch_error").is_none(), "{result}");
+    let items = result["results"].as_array().unwrap();
+    assert_eq!(items.len(), 5);
+    for (i, item) in items.iter().enumerate() {
+        assert_eq!(item["position"], i);
+        if i == 3 {
+            assert_eq!(item["status"], "error");
+            assert_eq!(item["error"]["reason"], "response_too_large");
+        } else {
+            assert_eq!(item["status"], "hits", "item {i}");
+            assert_eq!(item["hits"][0]["citation"]["ax_path"], "src/a.rs");
+        }
+    }
+    // One whole try, then halves until each request fits.
+    let sizes = requests.lock().unwrap().clone();
+    assert_eq!(sizes[0], 5, "{sizes:?}");
+    assert!(sizes.len() > 1, "{sizes:?}");
+    server.abort();
+    let _ = server.await;
+}
