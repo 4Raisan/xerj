@@ -13275,13 +13275,34 @@ fn node_ping_failure(url: &str, err: &anyhow::Error) -> String {
     if esclient::Es::ping_failure_is_auth(err) {
         format!("the node at {url} answered, but authentication failed.\n{err:#}")
     } else {
+        let loopback = loopback_retry_hint(url).unwrap_or_default();
         format!(
             "no XERJ node reachable at {url} ({err:#})\n\n\
              Start one, then re-run this command:\n  \
              xerj --insecure --data-dir ./.xerj-data &\n\n\
-             (or point at an existing node with --url / $XERJ_URL)"
+             (or point at an existing node with --url / $XERJ_URL){loopback}"
         )
     }
+}
+
+/// #2688 — the client defaults to `http://localhost:9200` while the node binds
+/// `127.0.0.1` by default. Where `localhost` resolves to `::1` first (seen on
+/// Windows) a running node looks absent, so a `localhost` URL gets the same
+/// URL with the IPv4 loopback spelled out. Any other host gets nothing.
+fn loopback_retry_hint(url: &str) -> Option<String> {
+    let mut parsed = reqwest::Url::parse(url).ok()?;
+    if !parsed.host_str()?.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    parsed.set_host(Some("127.0.0.1")).ok()?;
+    let mut retry = parsed.to_string();
+    if !url.ends_with('/') && retry.ends_with('/') {
+        retry.pop();
+    }
+    Some(format!(
+        "\n\nIf a node is running, `localhost` may have resolved to an address it does \
+         not listen on (it binds 127.0.0.1 by default). Try:\n  --url {retry}"
+    ))
 }
 
 #[cfg(test)]
@@ -13304,6 +13325,27 @@ mod node_ping_failure_tests {
         );
         assert!(msg.contains("--url"), "{msg}");
         assert!(!msg.contains("authentication failed"), "{msg}");
+        assert!(!msg.contains("may have resolved"), "{msg}");
+    }
+
+    #[test]
+    fn a_refused_localhost_url_suggests_the_ipv4_loopback() {
+        let err = anyhow::anyhow!(
+            "endpoint unreachable: http://localhost:9200: Connection refused (os error 10061)"
+        );
+        let msg = node_ping_failure("http://localhost:9200", &err);
+        assert!(msg.ends_with("--url http://127.0.0.1:9200"), "{msg}");
+        assert!(
+            msg.contains("xerj --insecure --data-dir ./.xerj-data"),
+            "{msg}"
+        );
+        // The caller's scheme, case and port are kept.
+        let msg = node_ping_failure("https://LocalHost:9443", &err);
+        assert!(msg.ends_with("--url https://127.0.0.1:9443"), "{msg}");
+        // An auth failure on localhost is not a resolution problem.
+        let auth = anyhow::anyhow!("GET / failed (HTTP 401)");
+        let msg = node_ping_failure("http://localhost:9200", &auth);
+        assert!(!msg.contains("127.0.0.1"), "{msg}");
     }
 
     #[test]

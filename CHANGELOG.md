@@ -41,6 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `xerj autoindex` and `xerj autoindex map`: when the node is unreachable at a `localhost` URL, the error now also suggests the same URL with `127.0.0.1`, since the node binds the IPv4 loopback by default and `localhost` can resolve to `::1` first (seen on Windows). (#2688)
 - The node binds its ES-compat and REST listeners before it opens its
   indices, and on plain-HTTP ports answers every request with
   `503 node_starting_exception` (with `Retry-After: 1`) until the engine is
