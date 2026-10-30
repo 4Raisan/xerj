@@ -207,6 +207,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is the index name before the dataset slug", which read as a wrong `--prefix`
   (#2670).
 
+- `xerj autoindex` reads a spreadsheet sheet with no header row and no text,
+  such as an all-numbers export, as a table: one record per row, columns named
+  `col_A`, `col_B` and so on, values keeping their cell types. It
+  used to index such a sheet as one text document, which the 4,096-section cap
+  cut off: in the #2720 reproduction a 200,000-row sheet kept rows up to
+  72,724. A sheet whose first 20 rows hold a text cell, uneven rows, one column
+  or only one row is still indexed as a document (#2720).
+- A `--no-graph` rerun no longer aborts when a file gains a part the committed
+  generation has no dataset for, for example a new or renamed spreadsheet
+  sheet, or a sheet that gains a header row and moves from the document
+  reading to the table reading. The file is set aside with a rebuild message
+  (exit 3) and every other file is still indexed. It used to stop the whole
+  run with "frozen assignment has 0 matches for group" (#2720).
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
