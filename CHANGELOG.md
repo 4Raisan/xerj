@@ -166,6 +166,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   0 for a run that would then be refused. The `--max-minutes` note on this
   route recommends `--dry-run` as the way to check a plan first (#2684).
 
+- `xerj search` and `xerj def` with no hits on a prefix whose autoindex
+  indices exist but whose first run has not finished now say so: search again
+  once the run finishes, or rerun the same command if it stopped. They used to
+  print the node's other indices and "the catalog lists no prefixes; --prefix
+  is the index name before the dataset slug", which read as a wrong `--prefix`
+  (#2670).
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
