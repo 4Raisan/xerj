@@ -6352,6 +6352,52 @@ fn contract_identity_changes(
     Ok(changes)
 }
 
+/// #2577: refuse a `--no-graph` run whose options differ from the ones the
+/// committed generation pinned. Runs before the reconcile plan is projected;
+/// the real run and its `--dry-run` preview share it (#2684).
+fn refuse_changed_no_graph_options(
+    base: &sync::CommittedManifest,
+    cfg: &IndexCfg,
+    root_identity: &str,
+) -> Result<()> {
+    match &base.execution {
+        Some(expected) => refuse_execution_changes(
+            base.generation,
+            no_graph_option_changes(expected, cfg, root_identity)?,
+        ),
+        None => Ok(()),
+    }
+}
+
+/// #2577: refuse a projected plan whose schema, index or embedder identity
+/// differs from the committed generation's. Shared by the real run and its
+/// `--dry-run` preview (#2684); only reads from the node.
+fn refuse_changed_planned_execution(
+    es: &Es,
+    base: &sync::CommittedManifest,
+    plan: &Plan,
+) -> Result<()> {
+    let Some(expected) = &base.execution else {
+        return Ok(());
+    };
+    refuse_execution_changes(base.generation, contract_identity_changes(expected, plan)?)?;
+    if plan
+        .datasets
+        .iter()
+        .any(|dataset| dataset.semantic_field.is_some())
+    {
+        let current = es.embedding_execution_identity()?;
+        ensure_embedding_execution_unchanged_and_resumable(
+            &current,
+            &expected.embedding_identity_sha256,
+            &expected.embedding_backend,
+            expected.embedding_dimension,
+            &expected.embedding_semantic_contract,
+        )?;
+    }
+    Ok(())
+}
+
 fn refuse_execution_changes(generation: u64, changes: Vec<String>) -> Result<()> {
     if changes.is_empty() {
         return Ok(());
@@ -9431,6 +9477,9 @@ fn run_index_report_inner(
                 .committed_manifest
                 .as_ref()
                 .context("branch guard proved a committed manifest")?;
+            // #2684: preview the refusal the real run below would make, rather
+            // than a plan it will not commit.
+            refuse_changed_no_graph_options(base, &cfg, &root_str)?;
             let mut plan = project_reconcile_plan(
                 &inventory,
                 &base.plan,
@@ -9441,6 +9490,7 @@ fn run_index_report_inner(
                 tally,
             )?;
             record_unreadable_skips(&mut plan, &inventory.unreadable);
+            refuse_changed_planned_execution(&es, base, &plan)?;
             let unchanged = serde_json::to_value(&plan)? == serde_json::to_value(&base.plan)?;
             let sizes = inventory_size_map(&inventory);
             let changed_bytes = if unchanged {
@@ -9515,13 +9565,9 @@ fn run_index_report_inner(
         // #2577: refuse a changed option before reconciling or sealing
         // anything. Both arms below require these fields to match; the
         // changed arm used to find out only after copying the corpus, as a
-        // false "state not internally consistent" error.
-        if let Some(expected) = &base.execution {
-            refuse_execution_changes(
-                base.generation,
-                no_graph_option_changes(expected, &cfg, &root_str)?,
-            )?;
-        }
+        // false "state not internally consistent" error. The `--dry-run`
+        // preview above runs the same two checks (#2684).
+        refuse_changed_no_graph_options(&base, &cfg, &root_str)?;
         let mut plan = project_reconcile_plan(
             &inventory,
             &base.plan,
@@ -9532,23 +9578,7 @@ fn run_index_report_inner(
             tally,
         )?;
         record_unreadable_skips(&mut plan, &inventory.unreadable);
-        if let Some(expected) = &base.execution {
-            refuse_execution_changes(base.generation, contract_identity_changes(expected, &plan)?)?;
-            if plan
-                .datasets
-                .iter()
-                .any(|dataset| dataset.semantic_field.is_some())
-            {
-                let current = es.embedding_execution_identity()?;
-                ensure_embedding_execution_unchanged_and_resumable(
-                    &current,
-                    &expected.embedding_identity_sha256,
-                    &expected.embedding_backend,
-                    expected.embedding_dimension,
-                    &expected.embedding_semantic_contract,
-                )?;
-            }
-        }
+        refuse_changed_planned_execution(&es, &base, &plan)?;
         // Say out loud that the decision gate is not on this route. It is an
         // incremental reconcile of an already-committed generation, so the work
         // is the *changed* set and is published from a sealed snapshot rather

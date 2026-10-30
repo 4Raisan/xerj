@@ -160,6 +160,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generation state is not internally consistent", although the state was
   intact and the original options still updated the corpus (#2577).
 
+- `xerj autoindex --no-graph --dry-run` now refuses a changed option the way
+  the real run does, naming the option, instead of printing a plan and exiting
+  0 for a run that would then be refused. The `--max-minutes` note on this
+  route recommends `--dry-run` as the way to check a plan first (#2684).
+
 ## [1.0.0-rc.100] - 2026-10-26
 
 **rc.100: faster autoindex and search, shaped by your field reports.** This
