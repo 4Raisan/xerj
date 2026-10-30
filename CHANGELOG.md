@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `xerj autoindex map --html <FILE>` and `--md <FILE>` export an offline
+  report with datasets, format counts, top symbols, graph file hubs,
+  catalog exclusions and suggested searches. `--redact-paths` hides file
+  paths and skip reasons. Existing files are never overwritten; ordinary
+  map and JSON output retain their behavior (#2643).
+
 - `xerj autoindex --exclude <glob>` leaves matching paths out of the index
   without editing an ignore file or deleting anything. Repeatable, same glob
   syntax as `--stub` — a pattern without `/` matches a file name at any depth,
